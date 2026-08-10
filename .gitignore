@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Generated validation artifacts
+validation/mock_ssh.log
+validation/mock_ground_truth.jsonl
+validation/validation_report.json
+validation/calibration_*.log
+validation/calibration_*.json
+validation/calibration_*.jsonl
+
+# Attack ground truth (generated at runtime)
+attacks/**/attack_ground_truth*.jsonl
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.sw?
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+*.local
+*.env
