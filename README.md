@@ -13,10 +13,10 @@ Attacker VM ──────────► Victim VM
             ssh.log (JSON)
                     │
          ┌──────────┴──────────┐
-         │  Validation Harness │  ← ground_truth.jsonl
-         └──────────┬──────────┘
+         │  API / Validation  │ ◄─── threat_intel.json (Interactive)
+         └──────────┬─────────┘
                     │
-         validation_report.json
+              JSON HTTP API
                     │
             ┌───────┴───────┐
             │   Dashboard   │  (React + Vite)
@@ -33,10 +33,12 @@ adversary-emulation-detection-lab/
 │   └── brute_force_slow/   # Slow SSH brute force emulator
 ├── detections/
 │   └── brute_force.yml     # Sigma rules (base + correlation)
+├── api_server.py                  # Flask backend for seamless UI integration
+├── requirements.txt
+├── threat_intel.json              # Auto-generated custom Threat Intel DB
 ├── validation/
-│   ├── test_harness.py            # O(N) sliding-window validator with JSON report output
-│   └── generate_calibration_data.py  # Generates clean + dirty datasets for calibration
-└── dashboard/                     # React/Vite telemetry viewer
+│   └── test_harness.py            # O(N) multi-protocol validator with Threat Intel lookups
+└── dashboard/                     # React/Vite premium telemetry viewer
 ```
 
 ## Current Emulations
@@ -47,49 +49,44 @@ adversary-emulation-detection-lab/
 
 ## Quick Start
 
-### 1. Run Calibration
+### 1. Install Dependencies
 
 ```bash
-cd validation
-python generate_calibration_data.py
+# Backend Python Dependencies
+pip install -r requirements.txt
 
-# Test 1: Clean baseline — expect 0 alerts
-python test_harness.py --zeek-log calibration_clean.log --output clean_report.json
-
-# Test 2: Dirty (attacks embedded) — expect alerts on all attacker IPs
-python test_harness.py --zeek-log calibration_dirty.log --ground-truth calibration_ground_truth.jsonl --output dirty_report.json
-```
-
-This outputs `validation_report.json` with classified alerts (TRUE POSITIVE / FALSE POSITIVE) and embedded raw Zeek logs.
-
-### 2. Launch the Dashboard
-
-```bash
+# Frontend React Dependencies
 cd dashboard
 npm install
+```
+
+### 2. Launch the Engine & Dashboard
+
+**Terminal 1 (Backend API):**
+```bash
+python api_server.py
+```
+
+**Terminal 2 (Frontend UI):**
+```bash
+cd dashboard
 npm run dev
 ```
 
-Open `http://localhost:5173`, click **Load validation_report.json**, and select the generated report from `validation/`.
+### 3. Hunt Threats Seamlessly
 
-### 3. Run Against Real Data
-
-```bash
-# On your Zeek sensor, after capturing real traffic:
-python test_harness.py \
-  --zeek-log /path/to/real/ssh.log \
-  --ground-truth /path/to/attack_ground_truth.jsonl \
-  --threshold 15 \
-  --output validation_report.json
-```
+1. Open `http://localhost:5175` in your browser.
+2. Click **Upload Data (.log/.csv/.gz)** and select any raw Zeek log, CSV, or compressed archive (e.g., `dns.log.gz`).
+3. The backend will natively unzip and parse the data, evaluate detection rules, and run a **Simulated Threat Intelligence API lookup** against every suspicious IP.
+4. Interact with the **Threat Intel Database** directly from the UI by clicking `[TAG BAD]` or `[TAG SAFE]`. This immediately saves to your local `threat_intel.json` and automatically classifies that IP in all future uploads!
 
 ## Dashboard Features
 
-- **File Upload** — Load any `validation_report.json` to visualize results
-- **Dynamic Stats** — TP/FP counts with color-coded severity indicators
-- **Alert Table** — Classification badges, source IPs, timestamps, event counts
-- **Raw Log Inspector** — Click any alert row to view the underlying Zeek JSON
-- **CSV Export** — One-click export of all alerts for external analysis
+- **Format-Agnostic Uploads** — Upload `.log`, `.csv`, `.tsv`, or `.gz` files directly. No preprocessing required.
+- **Interactive Threat Intelligence** — Manually label unknown IP addresses directly from the UI to build your own local Threat Intel Database.
+- **Dynamic Stats** — Real-time TP/FP counts with color-coded severity indicators.
+- **Raw Log Inspector** — Click any alert row to view the underlying Zeek JSON/TSV data.
+- **CSV Export** — One-click export of all alerts for external analysis.
 
 ## Validation Harness
 
