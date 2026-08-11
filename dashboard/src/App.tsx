@@ -108,11 +108,12 @@ function App() {
 
   const exportCSV = () => {
     if (!report) return
-    const h = 'Source IP,Classification,Source,Detection Type,Confidence,Start Time,End Time,Event Count\n'
+    const meta = `# Omnilog Export\n# Minimum Event Threshold: ${report.threshold}\n`
+    const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count\n'
     const rows = report.alerts.map(a =>
       `${a.source_ip},${a.classification},${a.classification_source || ''},${a.detection_label || ''},${a.detection_confidence || ''},${a.window_start},${a.window_end},${a.event_count}`
     ).join('\n')
-    const blob = new Blob([h + rows], { type: 'text/csv' })
+    const blob = new Blob([meta + h + rows], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -462,7 +463,7 @@ function App() {
             <div style={{ overflowX: 'auto' }}>
               <table className="data-table">
                 <thead>
-                  <tr><th>Class</th><th>Source IP</th><th>Detection</th><th>Events</th><th>Actions</th></tr>
+                  <tr><th>Class</th><th>Source IP</th><th>Detection</th><th>Evidence</th><th>Events</th><th>Actions</th></tr>
                 </thead>
                 <tbody>
                   {filteredAlerts.map((a, i) => (
@@ -472,10 +473,12 @@ function App() {
                           {a.classification}
                         </span>
                         {a.classification_source && <span className="source-tag">{a.classification_source}</span>}
-                        {a.detection_confidence === 'heuristic' && <span className="source-tag" title="Heuristic detection from PCAP data">⚠</span>}
                       </td>
                       <td className="data-text" title={a.source_ip}>{a.source_ip}</td>
                       <td className="data-text" title={a.detection_label}>{a.detection_label?.split('(')[0]?.trim() || a.detection_type || '—'}</td>
+                      <td>
+                        <span className="source-tag" title="Source of the telemetry data">{a.detection_confidence || '—'}</span>
+                      </td>
                       <td className="data-text">{a.event_count}</td>
                       <td>
                         <div className="flex-center">
