@@ -172,7 +172,7 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                         hostname = opt[1].decode('utf-8')
                                         out.write(json.dumps({
                                             "ts": ts, "intel_type": "host_profile",
-                                            "ip": src_ip, "hostname": hostname
+                                            "ip": src_ip, "mac": src_mac, "hostname": hostname
                                         }) + '\n')
                             except Exception:
                                 pass

@@ -334,16 +334,18 @@ def evaluate_rules(records, threshold=5, window_hours=1):
     
     unique_domains = collections.defaultdict(set)
     arrival_times = collections.defaultdict(list)
-    victim_profiles = collections.defaultdict(dict)
+    mac_to_hostname = {}
+    ip_to_mac = {}
 
     for record in records:
         if record.get('intel_type') == 'host_profile':
             ip = record.get('ip')
-            if ip:
-                if 'mac' in record:
-                    victim_profiles[ip]['MAC Address'] = record['mac']
-                if 'hostname' in record:
-                    victim_profiles[ip]['Host Name'] = record['hostname']
+            mac = record.get('mac')
+            hostname = record.get('hostname')
+            if mac and hostname:
+                mac_to_hostname[mac] = hostname
+            if ip and mac and ip != '0.0.0.0':
+                ip_to_mac[ip] = mac
             continue
         is_error = False
         detection_type = None
@@ -438,8 +440,11 @@ def evaluate_rules(records, threshold=5, window_hours=1):
         capped_logs.reverse()
         alert['raw_logs'] = capped_logs
         
-        if orig_h in victim_profiles:
-            alert['dynamic_context'] = victim_profiles[orig_h]
+        if orig_h in ip_to_mac:
+            mac = ip_to_mac[orig_h]
+            alert['dynamic_context'] = {'MAC Address': mac}
+            if mac in mac_to_hostname:
+                alert['dynamic_context']['Host Name'] = mac_to_hostname[mac]
         
         # Calculate Advanced DNS Metrics
         if alert['detection_type'] == 'dns_anomaly' and orig_h in unique_domains:
@@ -584,19 +589,10 @@ def enrich_ip(ip, alert_data, local_intel, cache):
                 if stddev is not None and stddev < 2.0 and event_count >= 5:
                     return 'TRUE POSITIVE', 'Automated Triage (Rigid Timing)', {'reason': f'Rigid beaconing (stddev {stddev}s)'}
 
-            # Lab Emulation Context (plus dynamic context if any)
+            # Dynamic Host Profile Context
             lab_details = {'reason': 'Internal network, manual triage required'}
             if alert_data.get('dynamic_context'):
                 lab_details.update(alert_data['dynamic_context'])
-                
-            if ip == '10.2.28.88':
-                lab_details.update({
-                    'Host name': 'DESKTOP-TEYQ2NR',
-                    'MAC address': '00:19:d1:b2:4d:ad',
-                    'Windows user': 'brolf',
-                    'Full name': 'Becka Rolf',
-                    'Correlated Traffic': 'NetSupport Manager RAT on 45.131.214.85:443'
-                })
 
             # All other unverified internal traffic requires human triage.
             return 'UNKNOWN', 'Unverified (Private IP)', lab_details
