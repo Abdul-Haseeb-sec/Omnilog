@@ -234,6 +234,18 @@ def upload_file():
             return jsonify({'error': 'Analysis engine failed',
                             'logs': result.stdout + result.stderr}), 500
 
+        output_logs = result.stdout + "\n" + result.stderr
+        import re
+        parsed_match = re.search(r"Parsed (\d+)/(\d+) usable records", output_logs)
+        if parsed_match:
+            yielded = int(parsed_match.group(1))
+            total = int(parsed_match.group(2))
+            if yielded == 0 and total > 0:
+                return jsonify({
+                    'error': '0 usable events extracted from this file — check that the format/schema matches what OmniLog expects',
+                    'logs': output_logs
+                }), 400
+
         with open(report_file, 'r', encoding='utf-8') as f:
             report = json.load(f)
 

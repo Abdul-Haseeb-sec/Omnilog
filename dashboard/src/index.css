@@ -122,12 +122,73 @@ h1, h2, h3, h4, h5, h6 {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  transition: transform 0.2s ease, border-color 0.2s ease;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease, background-color 0.25s ease;
+  position: relative;
+  overflow: hidden;
 }
 
 .stat-card:hover {
   transform: translateY(-2px);
   border-color: var(--text-muted);
+}
+
+.stat-card-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.stat-card-clickable:active {
+  transform: scale(0.97);
+}
+
+/* ── Active filter glow states ── */
+
+.stat-active {
+  transform: translateY(-2px);
+}
+
+.stat-active-all {
+  border-color: var(--signal);
+  box-shadow: 0 0 20px rgba(61, 219, 217, 0.15), inset 0 0 20px rgba(61, 219, 217, 0.03);
+}
+
+.stat-active-critical {
+  border-color: var(--critical);
+  box-shadow: 0 0 20px rgba(255, 90, 95, 0.2), inset 0 0 20px rgba(255, 90, 95, 0.04);
+  background-color: rgba(255, 90, 95, 0.04);
+}
+
+.stat-active-warn {
+  border-color: var(--warn);
+  box-shadow: 0 0 20px rgba(232, 163, 61, 0.2), inset 0 0 20px rgba(232, 163, 61, 0.04);
+  background-color: rgba(232, 163, 61, 0.04);
+}
+
+.stat-active-unknown {
+  border-color: var(--ok);
+  box-shadow: 0 0 20px rgba(79, 191, 122, 0.2), inset 0 0 20px rgba(79, 191, 122, 0.04);
+  background-color: rgba(79, 191, 122, 0.04);
+}
+
+/* ── Bottom indicator bar ── */
+
+.stat-indicator {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  animation: stat-indicator-grow 0.3s ease forwards;
+}
+
+.stat-indicator-all    { background: var(--signal); }
+.stat-indicator-critical { background: var(--critical); }
+.stat-indicator-warn   { background: var(--warn); }
+.stat-indicator-unknown { background: var(--ok); }
+
+@keyframes stat-indicator-grow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
 }
 
 .stat-value {
@@ -334,6 +395,75 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--text-muted);
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+/* ── Filter Chip & Clear ── */
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 6px;
+  border-radius: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--signal);
+  background: var(--signal-dim);
+  border: 1px solid rgba(61, 219, 217, 0.3);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  animation: chip-pop 0.2s ease;
+}
+
+.filter-chip:hover {
+  background: rgba(61, 219, 217, 0.25);
+  border-color: var(--signal);
+}
+
+.filter-chip-x {
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+
+.filter-chip:hover .filter-chip-x {
+  opacity: 1;
+}
+
+@keyframes chip-pop {
+  0%   { transform: scale(0.8); opacity: 0; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+.filter-clear-btn {
+  margin-top: 0.75rem;
+  padding: 6px 16px;
+  background: transparent;
+  border: 1px solid var(--signal);
+  color: var(--signal);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  transition: all 0.2s ease;
+}
+
+.filter-clear-btn:hover {
+  background: var(--signal-dim);
+}
+
+/* ── Alert Row Animation ── */
+
+.alert-row-enter {
+  animation: row-fade-in 0.25s ease;
+}
+
+@keyframes row-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 .tag-btn {

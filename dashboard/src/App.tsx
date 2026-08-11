@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { ShieldAlert, Activity, Upload, Download, FileJson, Globe, Beaker, Database, History, Trash2 } from 'lucide-react'
+import { ShieldAlert, Activity, Upload, Download, FileJson, Globe, Beaker, Database, History, Trash2, Filter, X } from 'lucide-react'
 import './index.css'
 
 interface Alert {
@@ -47,6 +47,7 @@ function App() {
   const [intelData, setIntelData] = useState<Record<string, unknown>>({})
   const [showHistory, setShowHistory] = useState(false)
   const [runs, setRuns] = useState<RunSummary[]>([])
+  const [activeFilter, setActiveFilter] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -148,6 +149,16 @@ function App() {
   const tpCount = report?.alerts.filter(a => a.classification === 'TRUE POSITIVE').length ?? 0
   const fpCount = report?.alerts.filter(a => a.classification === 'FALSE POSITIVE').length ?? 0
   const unkCount = report?.alerts.filter(a => a.classification === 'UNKNOWN').length ?? 0
+
+  const toggleFilter = (classification: string) => {
+    setActiveFilter(prev => prev === classification ? null : classification)
+  }
+
+  const filteredAlerts = report?.alerts.filter(a => {
+    if (!activeFilter) return true
+    if (activeFilter === 'ALL') return true
+    return a.classification === activeFilter
+  }) ?? []
 
   const fmtTs = (iso: string) => iso.replace('T', ' ').substring(0, 19)
 
@@ -372,21 +383,45 @@ function App() {
 
       {/* ── Stats Grid ───────────────────────────────────────── */}
       <div className="stats-grid">
-        <div className="stat-card">
+        <div
+          className={`stat-card stat-card-clickable ${activeFilter === 'ALL' || (!activeFilter && !report) ? '' : activeFilter === null && report ? 'stat-active stat-active-all' : ''}`}
+          onClick={() => report && toggleFilter('ALL')}
+          title={report ? 'Show all alerts' : ''}
+          id="stat-total-alerts"
+        >
           <div className="stat-label">Total Alerts</div>
           <div className={`stat-value ${report ? 'text-primary' : 'text-muted'}`}>{report ? report.alerts.length : '—'}</div>
+          {activeFilter === null && report && <div className="stat-indicator stat-indicator-all" />}
         </div>
-        <div className="stat-card">
+        <div
+          className={`stat-card stat-card-clickable ${activeFilter === 'TRUE POSITIVE' ? 'stat-active stat-active-critical' : ''}`}
+          onClick={() => report && tpCount > 0 && toggleFilter('TRUE POSITIVE')}
+          title={report && tpCount > 0 ? 'Filter: True Positives only' : ''}
+          id="stat-true-positives"
+        >
           <div className="stat-label">True Positives</div>
           <div className={`stat-value ${tpCount > 0 ? 'text-critical' : 'text-muted'}`}>{report ? tpCount : '—'}</div>
+          {activeFilter === 'TRUE POSITIVE' && <div className="stat-indicator stat-indicator-critical" />}
         </div>
-        <div className="stat-card">
+        <div
+          className={`stat-card stat-card-clickable ${activeFilter === 'FALSE POSITIVE' ? 'stat-active stat-active-warn' : ''}`}
+          onClick={() => report && fpCount > 0 && toggleFilter('FALSE POSITIVE')}
+          title={report && fpCount > 0 ? 'Filter: False Positives only' : ''}
+          id="stat-false-positives"
+        >
           <div className="stat-label">False Positives</div>
           <div className={`stat-value ${fpCount > 0 ? 'text-warn' : (report ? 'text-ok' : 'text-muted')}`}>{report ? fpCount : '—'}</div>
+          {activeFilter === 'FALSE POSITIVE' && <div className="stat-indicator stat-indicator-warn" />}
         </div>
-        <div className="stat-card">
+        <div
+          className={`stat-card stat-card-clickable ${activeFilter === 'UNKNOWN' ? 'stat-active stat-active-unknown' : ''}`}
+          onClick={() => report && unkCount > 0 && toggleFilter('UNKNOWN')}
+          title={report && unkCount > 0 ? 'Filter: Needs Review only' : ''}
+          id="stat-needs-review"
+        >
           <div className="stat-label">Needs Review</div>
           <div className={`stat-value ${unkCount > 0 ? 'text-warn' : 'text-muted'}`}>{report ? unkCount : '—'}</div>
+          {activeFilter === 'UNKNOWN' && <div className="stat-indicator stat-indicator-unknown" />}
         </div>
       </div>
 
@@ -394,8 +429,21 @@ function App() {
       <div className="content-grid">
         <div className="panel" style={{ overflow: 'hidden' }}>
           <div className="panel-title flex-between">
-            <span className="flex-center gap-sm"><ShieldAlert size={16} /> Validated Alerts</span>
-            <span className="data-text">{report ? fmtTs(report.timestamp) + ' UTC' : 'Awaiting data'}</span>
+            <span className="flex-center gap-sm">
+              <ShieldAlert size={16} /> Validated Alerts
+              {activeFilter && (
+                <span className="filter-chip" onClick={() => setActiveFilter(null)}>
+                  <Filter size={12} />
+                  {activeFilter === 'ALL' ? 'All' : activeFilter}
+                  <X size={12} className="filter-chip-x" />
+                </span>
+              )}
+            </span>
+            <span className="data-text">
+              {report
+                ? `${filteredAlerts.length}${activeFilter ? ` of ${report.alerts.length}` : ''} — ${fmtTs(report.timestamp)} UTC`
+                : 'Awaiting data'}
+            </span>
           </div>
 
           {loading ? (
@@ -404,6 +452,12 @@ function App() {
             <div className="empty-state">Upload a log file, PCAP, XML export, or syslog to begin analysis</div>
           ) : report.alerts.length === 0 ? (
             <div className="empty-state" style={{ border: 'none' }}>No alerts generated for this dataset</div>
+          ) : filteredAlerts.length === 0 ? (
+            <div className="empty-state" style={{ border: 'none' }}>
+              No {activeFilter} alerts in this report
+              <br />
+              <button className="filter-clear-btn" onClick={() => setActiveFilter(null)}>Clear Filter</button>
+            </div>
           ) : (
             <div style={{ overflowX: 'auto' }}>
               <table className="data-table">
@@ -411,8 +465,8 @@ function App() {
                   <tr><th>Class</th><th>Source IP</th><th>Detection</th><th>Events</th><th>Actions</th></tr>
                 </thead>
                 <tbody>
-                  {report.alerts.map((a, i) => (
-                    <tr key={i}>
+                  {filteredAlerts.map((a, i) => (
+                    <tr key={i} className="alert-row-enter">
                       <td>
                         <span className={`badge ${a.classification === 'TRUE POSITIVE' ? 'critical' : a.classification === 'FALSE POSITIVE' ? 'warn' : 'ok'}`}>
                           {a.classification}

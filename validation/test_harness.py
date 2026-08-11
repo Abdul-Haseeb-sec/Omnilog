@@ -49,10 +49,11 @@ WIN_NS = 'http://schemas.microsoft.com/win/2004/08/events/event'
 
 # ── Format-Specific Parsers ────────────────────────────────────────────────────
 
-def _parse_syslog(f):
+def _parse_syslog(f, counts=None):
     """Parse syslog / auth.log (RFC 3164 BSD format)."""
     year = datetime.now().year
     for line in f:
+        if counts is not None: counts[0] += 1
         line = line.strip()
         if not line:
             continue
@@ -70,6 +71,7 @@ def _parse_syslog(f):
         fail = SYSLOG_FAIL.search(line)
         if fail:
             user, ip, _ = fail.groups()
+            if counts is not None: counts[1] += 1
             yield {'ts': str(ts), 'id.orig_h': ip, 'auth_success': False,
                    'username': user, 'service': 'ssh', 'hostname': hostname}
             continue
@@ -77,11 +79,12 @@ def _parse_syslog(f):
         ok = SYSLOG_OK.search(line)
         if ok:
             user, ip, _ = ok.groups()
+            if counts is not None: counts[1] += 1
             yield {'ts': str(ts), 'id.orig_h': ip, 'auth_success': True,
                    'username': user, 'service': 'ssh', 'hostname': hostname}
 
 
-def _parse_windows_xml(filepath):
+def _parse_windows_xml(filepath, counts=None):
     """Parse Windows Event Log XML exports (Event Viewer → Save All Events As → XML)."""
     try:
         tree = ET.parse(filepath)
@@ -99,6 +102,7 @@ def _parse_windows_xml(filepath):
             ns = tag0.split('}')[0] + '}'
 
     for event in root.iter(f'{ns}Event'):
+        if counts is not None: counts[0] += 1
         system = event.find(f'{ns}System')
         edata = event.find(f'{ns}EventData')
         if system is None:
@@ -138,13 +142,18 @@ def _parse_windows_xml(filepath):
             rec['auth_success'] = False
             if ip:
                 rec['id.orig_h'] = ip
+                if counts is not None: counts[1] += 1
                 yield rec
         # 4624 = Successful logon
         elif eid == '4624':
             rec['auth_success'] = True
             if ip:
                 rec['id.orig_h'] = ip
+                if counts is not None: counts[1] += 1
                 yield rec
+
+    if counts is not None and counts[0] > 0:
+        log.info(f"Parsed XML: {counts[0]} events found, {counts[1]} matched known auth EventIDs [4624/4625/4771] — if your export contains other event types, detection rules for those aren't implemented yet")
 
 
 def _normalize_suricata(rec):
@@ -184,6 +193,8 @@ ZEEK_HTTP_FIELDS = ["ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp
 
 def parse_log(log_path):
     """Auto-detect format and yield normalized records."""
+    counts = [0, 0]
+    fmt = "Unknown"
     try:
         # Binary/XML check: read first bytes
         with open(log_path, 'rb') as bf:
@@ -191,8 +202,12 @@ def parse_log(log_path):
 
         # ── XML (Windows Event Log exports) ────────────────────────
         if head.startswith(b'<?xml') or head.startswith(b'<Events') or head.startswith(b'<Event'):
+            fmt = "Windows Event Log XML"
             log.info("Detected format: Windows Event Log XML")
-            yield from _parse_windows_xml(log_path)
+            yield from _parse_windows_xml(log_path, counts)
+            log.info(f"Parsed {counts[1]}/{counts[0]} usable records")
+            if counts[1] == 0 and counts[0] > 0:
+                log.warning(f"0 usable records extracted from {fmt} format — check schema compatibility")
             return
 
         with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -201,17 +216,20 @@ def parse_log(log_path):
 
             # ── Zeek TSV ───────────────────────────────────────────
             if first_line.startswith('#') or ('\t' in first_line and not first_line.startswith('{')):
+                fmt = "Zeek TSV"
                 log.info("Detected format: Zeek TSV")
                 reader = csv.reader(f, delimiter='\t')
                 fields = []
                 warned_unrecognized = False
                 for row in reader:
+                    counts[0] += 1
                     if not row:
                         continue
                     if row[0] == '#fields':
                         fields = row[1:]
                     elif not row[0].startswith('#'):
                         if fields:
+                            counts[1] += 1
                             yield dict(zip(fields, row))
                         else:
                             rl = len(row)
@@ -226,6 +244,7 @@ def parse_log(log_path):
                             elif rl == 27: schema = ZEEK_HTTP_FIELDS
                             
                             if schema:
+                                counts[1] += 1
                                 yield dict(zip(schema, row))
                             elif not warned_unrecognized:
                                 log.warning(f"Headerless Zeek log with unrecognized column count ({rl}) — cannot map fields reliably. Supported: ssh.log (18 cols), dns.log (23 cols), http.log (27 cols). Consider exporting with a #fields header or enabling json-logs.zeek.")
@@ -233,30 +252,63 @@ def parse_log(log_path):
 
             # ── Syslog / auth.log ──────────────────────────────────
             elif SYSLOG_TS.match(first_line):
+                fmt = "syslog / auth.log"
                 log.info("Detected format: syslog / auth.log")
-                yield from _parse_syslog(f)
+                yield from _parse_syslog(f, counts)
 
             # ── CSV ────────────────────────────────────────────────
             elif ',' in first_line and not first_line.startswith('{'):
+                fmt = "CSV"
                 log.info("Detected format: CSV")
                 reader = csv.DictReader(f)
                 for row in reader:
+                    counts[0] += 1
+                    counts[1] += 1
                     yield row
 
             # ── JSON Lines (Zeek JSON / Suricata / PCAP extract) ──
             else:
+                fmt = "JSON Lines"
                 log.info("Detected format: JSON Lines")
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                        if 'event_type' in record and 'id.orig_h' not in record:
-                            record = _normalize_suricata(record)
-                        yield record
-                    except json.JSONDecodeError:
-                        continue
+                f.seek(0)
+                full_parsed = False
+                try:
+                    full_json = json.load(f)
+                    if isinstance(full_json, list):
+                        log.info("Successfully loaded as a JSON array")
+                        for item in full_json:
+                            counts[0] += 1
+                            if not isinstance(item, dict): continue
+                            if 'event_type' in item and 'id.orig_h' not in item:
+                                item = _normalize_suricata(item)
+                            counts[1] += 1
+                            yield item
+                        full_parsed = True
+                except json.JSONDecodeError:
+                    pass
+                
+                if not full_parsed:
+                    f.seek(0)
+                    for line in f:
+                        counts[0] += 1
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                            if 'event_type' in record and 'id.orig_h' not in record:
+                                record = _normalize_suricata(record)
+                            counts[1] += 1
+                            yield record
+                        except json.JSONDecodeError:
+                            continue
+
+        log.info(f"Parsed {counts[1]}/{counts[0]} usable records")
+        if counts[1] == 0 and counts[0] > 0:
+            if fmt == "JSON Lines":
+                log.warning("0/N lines parsed as standalone JSON — if this is a pretty-printed JSON array rather than newline-delimited JSON, that's why")
+            else:
+                log.warning(f"0 usable records extracted from {fmt} format — check schema compatibility")
 
     except FileNotFoundError:
         log.error("Log file not found: %s", log_path)
@@ -341,34 +393,39 @@ def evaluate_rules(records, threshold=15, window_hours=1):
         if current_count >= threshold:
             dominant = max(type_counts[orig_h], key=type_counts[orig_h].get)
 
-            # Cap raw_logs to last 100 to avoid huge reports (O(1) extraction)
-            capped_logs = []
-            for i, e in enumerate(reversed(windows[orig_h])):
-                if i >= 100:
-                    break
-                capped_logs.append(e['raw'])
-            capped_logs.reverse()
-
-            first_event = windows[orig_h][0]
-
-            alert_data = {
-                'source_ip': orig_h,
-                'dest_ip': first_event['raw'].get('id.resp_h', ''),
-                'window_start': first_event['dt'].isoformat(),
-                'window_end': dt.isoformat(),
-                'event_count': current_count,
-                'detection_type': dominant,
-                'raw_logs': capped_logs,
-                'detection_confidence': 'heuristic' if pcap_counts[orig_h] > 0 else 'verified',
-            }
-
             if orig_h in alerted:
-                # Update existing alert in place (§2.5 fix)
-                alerts[alerted[orig_h]] = alert_data
+                # Update existing alert in place (§2.5 fix) in O(1) time
+                alert_data = alerts[alerted[orig_h]]
+                alert_data['window_end'] = dt.isoformat()
+                alert_data['event_count'] = current_count
+                alert_data['detection_type'] = dominant
+                alert_data['detection_confidence'] = 'heuristic' if pcap_counts[orig_h] > 0 else 'verified'
             else:
+                first_event = windows[orig_h][0]
+                alert_data = {
+                    'source_ip': orig_h,
+                    'dest_ip': first_event['raw'].get('id.resp_h', ''),
+                    'window_start': first_event['dt'].isoformat(),
+                    'window_end': dt.isoformat(),
+                    'event_count': current_count,
+                    'detection_type': dominant,
+                    'raw_logs': [],
+                    'detection_confidence': 'heuristic' if pcap_counts[orig_h] > 0 else 'verified',
+                }
                 alerted[orig_h] = len(alerts)
                 alerts.append(alert_data)
             # Window is NOT cleared — alert updates on every new event
+
+    # Defer building capped_logs to the very end so it runs O(1) time per IP instead of per event
+    for alert in alerts:
+        orig_h = alert['source_ip']
+        capped_logs = []
+        for i, e in enumerate(reversed(windows[orig_h])):
+            if i >= 100:
+                break
+            capped_logs.append(e['raw'])
+        capped_logs.reverse()
+        alert['raw_logs'] = capped_logs
 
     return alerts
 

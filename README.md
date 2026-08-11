@@ -66,8 +66,9 @@ cd dashboard && npm run dev
 
 1. Open `http://localhost:5173`
 2. Click **Upload Data** and select a `.pcap`, `.log`, `.csv`, `.json`, or `.gz` file
-3. Review alerts — click any row to see the full detail breakdown
-4. Tag unknown IPs as malicious or safe — your tags persist across sessions
+3. **Interactive Filtering:** Click the stat cards (True Positives, False Positives, Needs Review) to instantly filter the dashboard view.
+4. Review alerts — click any row to see the full detail breakdown, timeline, and intel.
+5. Tag unknown IPs as malicious or safe — your tags persist across sessions.
 
 ## PCAP Analysis
 

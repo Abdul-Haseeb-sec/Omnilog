@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import pytest
+import logging
 from datetime import datetime, timezone
 
 # Add parent dir to path so we can import the harness
@@ -67,6 +68,42 @@ class TestParseLog:
     def test_missing_file(self):
         records = list(parse_log('/nonexistent/path.json'))
         assert len(records) == 0
+
+    def test_json_array_pretty_printed(self):
+        content = '''[
+  {"ts": "1", "id.orig_h": "1.1.1.1", "auth_success": false},
+  {"ts": "2", "id.orig_h": "2.2.2.2", "auth_success": true}
+]'''
+        path = _write_temp(content)
+        records = list(parse_log(path))
+        os.unlink(path)
+        assert len(records) == 2
+        assert records[0]['id.orig_h'] == '1.1.1.1'
+        assert records[1]['id.orig_h'] == '2.2.2.2'
+
+    def test_xml_unhandled_events(self, caplog):
+        caplog.set_level(logging.INFO)
+        content = '''<?xml version="1.0"?>
+<Events>
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System><EventID>4634</EventID><TimeCreated SystemTime="2026-08-10T14:23:01Z"/></System>
+    <EventData><Data Name="IpAddress">10.0.0.5</Data></EventData>
+  </Event>
+</Events>'''
+        path = _write_temp(content, suffix='.xml')
+        records = list(parse_log(path))
+        os.unlink(path)
+        assert len(records) == 0
+        assert "Parsed XML: 1 events found, 0 matched" in caplog.text
+
+    def test_zeek_tsv_logging_counts(self, caplog):
+        caplog.set_level(logging.INFO)
+        content = '#fields\tts\tid.orig_h\tauth_success\n1000\t10.0.0.1\tF\n'
+        path = _write_temp(content, suffix='.log')
+        records = list(parse_log(path))
+        os.unlink(path)
+        assert len(records) == 1
+        assert "Parsed 1/2 usable records" in caplog.text
 
     def test_syslog_format(self):
         content = 'Aug 10 14:23:01 server sshd[123]: Failed password for root from 192.168.1.100 port 54321 ssh2\n'
