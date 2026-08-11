@@ -94,15 +94,14 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                     if not isinstance(ip_pkt, dpkt.ip.IP):
                         continue
 
-                    src = socket.inet_ntoa(ip_pkt.src)
-                    dst = socket.inet_ntoa(ip_pkt.dst)
-
                     # ── TCP ────────────────────────────────────────────────
                     if isinstance(ip_pkt.data, dpkt.tcp.TCP):
                         tcp = ip_pkt.data
                         is_syn = bool(tcp.flags & dpkt.tcp.TH_SYN) and not bool(tcp.flags & dpkt.tcp.TH_ACK)
 
                         if is_syn:
+                            src = socket.inet_ntoa(ip_pkt.src)
+                            dst = socket.inet_ntoa(ip_pkt.dst)
                             rec = {"ts": ts, "id.orig_h": src, "id.resp_h": dst,
                                    "id.resp_p": tcp.dport, "proto": "tcp",
                                    "pcap_event": "syn"}
@@ -113,9 +112,11 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                             stats["tcp_connections"] += 1
 
                         # HTTP response parsing (ports 80/8080/8000)
-                        if tcp.sport in (80, 8080, 8000) and tcp.data:
+                        elif tcp.sport in (80, 8080, 8000) and tcp.data:
                             try:
                                 if tcp.data[:4] == b'HTTP':
+                                    src = socket.inet_ntoa(ip_pkt.src)
+                                    dst = socket.inet_ntoa(ip_pkt.dst)
                                     resp = dpkt.http.Response(tcp.data)
                                     out.write(json.dumps({
                                         "ts": ts, "id.orig_h": dst,
@@ -134,6 +135,8 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                             try:
                                 dns = dpkt.dns.DNS(udp.data)
                                 if dns.qr == dpkt.dns.DNS_R:
+                                    src = socket.inet_ntoa(ip_pkt.src)
+                                    dst = socket.inet_ntoa(ip_pkt.dst)
                                     rcode_map = {
                                         dpkt.dns.DNS_RCODE_NXDOMAIN: "NXDOMAIN",
                                         dpkt.dns.DNS_RCODE_SERVFAIL: "SERVFAIL",
@@ -186,9 +189,11 @@ def upload_file():
         process_path = file_path
         pcap_stats = None
 
+        is_pcap = safe_name.lower().endswith('.pcap') or safe_name.lower().endswith('.pcap.gz')
+
         # ── Decompress .gz with size guard ─────────────────────────────────
         if safe_name.lower().endswith('.gz'):
-            process_path = os.path.join(temp_dir, "decompressed.log")
+            process_path = os.path.join(temp_dir, "decompressed.pcap" if is_pcap else "decompressed.log")
             max_bytes = MAX_UPLOAD_MB * 1024 * 1024 * 2
             written = 0
             with gzip.open(file_path, 'rb') as fin:
@@ -204,9 +209,10 @@ def upload_file():
             log.info("Decompressed %s → %d bytes", safe_name, written)
 
         # ── Native PCAP parsing ────────────────────────────────────────────
-        elif safe_name.lower().endswith('.pcap'):
+        if is_pcap:
+            pcap_src = process_path
             process_path = os.path.join(temp_dir, "extracted_pcap.jsonl")
-            pcap_stats = extract_pcap_to_jsonl(file_path, process_path)
+            pcap_stats = extract_pcap_to_jsonl(pcap_src, process_path)
             log.info("PCAP extraction: %s", pcap_stats)
             total_events = pcap_stats["tcp_connections"] + pcap_stats["dns_events"] + pcap_stats["http_events"]
             if total_events == 0:
@@ -217,7 +223,7 @@ def upload_file():
         cmd = [sys.executable, 'validation/test_harness.py',
                '--zeek-log', process_path, '--output', report_file]
 
-        if safe_name.lower().endswith('.pcap'):
+        if is_pcap:
             cmd.extend(['--threshold', '5'])
 
         result = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True,
