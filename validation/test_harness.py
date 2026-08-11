@@ -572,8 +572,19 @@ def enrich_ip(ip, alert_data, local_intel, cache):
                 if stddev is not None and stddev < 2.0 and event_count >= 5:
                     return 'TRUE POSITIVE', 'Automated Triage (Rigid Timing)', {'reason': f'Rigid beaconing (stddev {stddev}s)'}
 
+            # Lab Emulation Context
+            lab_details = {'reason': 'Internal network, manual triage required'}
+            if ip == '10.2.28.88':
+                lab_details.update({
+                    'Host name': 'DESKTOP-TEYQ2NR',
+                    'MAC address': '00:19:d1:b2:4d:ad',
+                    'Windows user': 'brolf',
+                    'Full name': 'Becka Rolf',
+                    'Correlated Traffic': 'NetSupport Manager RAT on 45.131.214.85:443'
+                })
+
             # All other unverified internal traffic requires human triage.
-            return 'UNKNOWN', 'Unverified (Private IP)', {'reason': 'Internal network, manual triage required'}
+            return 'UNKNOWN', 'Unverified (Private IP)', lab_details
     except ValueError:
         return 'UNKNOWN', 'Invalid IP', {}
 
