@@ -316,7 +316,7 @@ def parse_log(log_path):
 
 # ── Sliding-Window Detection Engine ────────────────────────────────────────────
 
-def evaluate_rules(records, threshold=15, window_hours=1):
+def evaluate_rules(records, threshold=5, window_hours=1):
     """
     O(N) streaming anomaly detection with deque-based sliding windows.
 
@@ -341,7 +341,7 @@ def evaluate_rules(records, threshold=15, window_hours=1):
                 detection_type = 'ssh_brute_force'
         elif 'rcode_name' in record:
             rcode = record['rcode_name']
-            if rcode and rcode != 'NOERROR':
+            if rcode in ('NXDOMAIN', 'SERVFAIL'):
                 is_error = True
                 detection_type = 'dns_anomaly'
         elif 'status_code' in record:
@@ -573,7 +573,7 @@ def main():
     parser = argparse.ArgumentParser(description="OmniLog Detection Harness")
     parser.add_argument("--zeek-log", required=True, help="Path to log file (any supported format)")
     parser.add_argument("--ground-truth", help="Path to attack_ground_truth.jsonl")
-    parser.add_argument("--threshold", type=int, default=15, help="Event count threshold")
+    parser.add_argument("--threshold", type=int, default=5, help="Event count threshold")
     parser.add_argument("--output", default="validation_report.json", help="Report output path")
     args = parser.parse_args()
 
