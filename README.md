@@ -23,11 +23,9 @@ A detection engineering tool that implements a complete **attack → capture →
 ## What This Actually Does
 
 1. **Parses any format natively** — Zeek TSV, JSON Lines, Suricata eve.json, CSV, compressed `.gz`, and raw `.pcap` captures (via `dpkt`). No external dependencies like Zeek required for PCAP analysis.
-2. **Detects anomalies** — Streaming O(N) sliding-window engine catches SSH brute force, DNS anomalies (NXDOMAIN/SERVFAIL), and HTTP errors (4xx/5xx) from any source.
-3. **Real threat intelligence** — Every flagged IP is checked against AbuseIPDB (if configured) or AlienVault OTX (free, no key). Every classification shows its source.
-4. **Two modes**:
-   - **Lab Mode**: Upload logs with a ground-truth file for validated TP/FP scoring.
-   - **Live Mode**: Upload real-world captures and get genuine threat intel lookups.
+2. **Detects anomalies** — Streaming O(N) cumulative tracking engine catches SSH brute force, DNS anomalies (NXDOMAIN/SERVFAIL), and HTTP errors (4xx/5xx) without eviction bottlenecks.
+3. **Multi-Signal Triage** — Uses mathematical heuristics (Shannon Entropy, Domain Diversity, and Timing Variance) to strictly auto-classify True Positives (DGAs/Beacons) and False Positives (misconfigured apps). Uncertain edge cases are deferred to a human review queue.
+4. **Real threat intelligence** — Every flagged IP is checked against AbuseIPDB (if configured) or AlienVault OTX (free, no key). Every classification shows its source.
 5. **Human-in-the-loop** — Tag any IP as malicious or safe from the dashboard. Tags persist in `threat_intel.json` and are used in all future analyses.
 
 ## Quick Start
