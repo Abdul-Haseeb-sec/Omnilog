@@ -334,8 +334,17 @@ def evaluate_rules(records, threshold=5, window_hours=1):
     
     unique_domains = collections.defaultdict(set)
     arrival_times = collections.defaultdict(list)
+    victim_profiles = collections.defaultdict(dict)
 
     for record in records:
+        if record.get('intel_type') == 'host_profile':
+            ip = record.get('ip')
+            if ip:
+                if 'mac' in record:
+                    victim_profiles[ip]['MAC Address'] = record['mac']
+                if 'hostname' in record:
+                    victim_profiles[ip]['Host Name'] = record['hostname']
+            continue
         is_error = False
         detection_type = None
 
@@ -428,6 +437,9 @@ def evaluate_rules(records, threshold=5, window_hours=1):
             capped_logs.append(e['raw'])
         capped_logs.reverse()
         alert['raw_logs'] = capped_logs
+        
+        if orig_h in victim_profiles:
+            alert['dynamic_context'] = victim_profiles[orig_h]
         
         # Calculate Advanced DNS Metrics
         if alert['detection_type'] == 'dns_anomaly' and orig_h in unique_domains:
@@ -572,8 +584,11 @@ def enrich_ip(ip, alert_data, local_intel, cache):
                 if stddev is not None and stddev < 2.0 and event_count >= 5:
                     return 'TRUE POSITIVE', 'Automated Triage (Rigid Timing)', {'reason': f'Rigid beaconing (stddev {stddev}s)'}
 
-            # Lab Emulation Context
+            # Lab Emulation Context (plus dynamic context if any)
             lab_details = {'reason': 'Internal network, manual triage required'}
+            if alert_data.get('dynamic_context'):
+                lab_details.update(alert_data['dynamic_context'])
+                
             if ip == '10.2.28.88':
                 lab_details.update({
                     'Host name': 'DESKTOP-TEYQ2NR',
