@@ -274,6 +274,8 @@ def evaluate_rules(records, threshold=15, window_hours=1):
     """
     alerts = []
     windows = {}
+    type_counts = {}
+    pcap_counts = {}
     alerted = {}  # orig_h → index in alerts[]
 
     for record in records:
@@ -316,39 +318,42 @@ def evaluate_rules(records, threshold=15, window_hours=1):
 
         if orig_h not in windows:
             windows[orig_h] = deque()
+            type_counts[orig_h] = {}
+            pcap_counts[orig_h] = 0
 
-        windows[orig_h].append({'dt': dt, 'raw': record, 'type': detection_type})
+        has_pcap = 1 if record.get('pcap_event') else 0
+        windows[orig_h].append({'dt': dt, 'raw': record, 'type': detection_type, 'has_pcap': has_pcap})
+        type_counts[orig_h][detection_type] = type_counts[orig_h].get(detection_type, 0) + 1
+        pcap_counts[orig_h] += has_pcap
 
         # Evict events outside the sliding window
         cutoff = dt - timedelta(hours=window_hours)
         while windows[orig_h] and windows[orig_h][0]['dt'] < cutoff:
-            windows[orig_h].popleft()
+            evicted = windows[orig_h].popleft()
+            t = evicted['type']
+            type_counts[orig_h][t] -= 1
+            if type_counts[orig_h][t] == 0:
+                del type_counts[orig_h][t]
+            pcap_counts[orig_h] -= evicted['has_pcap']
 
         current_count = len(windows[orig_h])
 
         if current_count >= threshold:
-            events = list(windows[orig_h])
-            type_counts = {}
-            has_pcap_heuristic = False
-            for e in events:
-                t = e['type']
-                type_counts[t] = type_counts.get(t, 0) + 1
-                if e['raw'].get('pcap_event'):
-                    has_pcap_heuristic = True
-            dominant = max(type_counts, key=type_counts.get)
+            dominant = max(type_counts[orig_h], key=type_counts[orig_h].get)
 
             # Cap raw_logs to last 100 to avoid huge reports
-            capped_logs = [e['raw'] for e in events[-100:]]
+            q_list = list(windows[orig_h])
+            capped_logs = [e['raw'] for e in q_list[-100:]]
 
             alert_data = {
                 'source_ip': orig_h,
-                'dest_ip': events[0]['raw'].get('id.resp_h', ''),
-                'window_start': events[0]['dt'].isoformat(),
+                'dest_ip': q_list[0]['raw'].get('id.resp_h', ''),
+                'window_start': q_list[0]['dt'].isoformat(),
                 'window_end': dt.isoformat(),
                 'event_count': current_count,
                 'detection_type': dominant,
                 'raw_logs': capped_logs,
-                'detection_confidence': 'heuristic' if has_pcap_heuristic else 'verified',
+                'detection_confidence': 'heuristic' if pcap_counts[orig_h] > 0 else 'verified',
             }
 
             if orig_h in alerted:

@@ -22,6 +22,7 @@ attacks/**/attack_ground_truth*.jsonl
 
 # Test / sample data
 *.pcap
+*.gz
 
 # Environment secrets
 .env
