@@ -13,6 +13,7 @@ Supported formats:
 import json
 import argparse
 import csv
+import math
 import os
 import re
 import time
@@ -21,6 +22,7 @@ import ipaddress
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
+import collections
 from collections import deque
 
 from dotenv import load_dotenv
@@ -329,6 +331,9 @@ def evaluate_rules(records, threshold=5, window_hours=1):
     alerted = {}  # orig_h → index in alerts[]
     first_dt = {}
     first_dest = {}
+    
+    unique_domains = collections.defaultdict(set)
+    arrival_times = collections.defaultdict(list)
 
     for record in records:
         is_error = False
@@ -379,6 +384,13 @@ def evaluate_rules(records, threshold=5, window_hours=1):
         windows[orig_h].append({'dt': dt, 'raw': record, 'type': detection_type, 'has_pcap': has_pcap})
         type_counts[orig_h][detection_type] = type_counts[orig_h].get(detection_type, 0) + 1
         pcap_counts[orig_h] += has_pcap
+        
+        if detection_type == 'dns_anomaly':
+            query = record.get('query')
+            if query and len(unique_domains[orig_h]) < 10000:
+                unique_domains[orig_h].add(query)
+            if len(arrival_times[orig_h]) < 10000:
+                arrival_times[orig_h].append(float(ts_val))
 
         # No eviction logic. We track all-time cumulative counts.
         current_count = sum(type_counts[orig_h].values())
@@ -416,6 +428,32 @@ def evaluate_rules(records, threshold=5, window_hours=1):
             capped_logs.append(e['raw'])
         capped_logs.reverse()
         alert['raw_logs'] = capped_logs
+        
+        # Calculate Advanced DNS Metrics
+        if alert['detection_type'] == 'dns_anomaly' and orig_h in unique_domains:
+            domains = unique_domains[orig_h]
+            diversity = len(domains)
+            
+            def shannon_entropy(s):
+                if not s: return 0
+                counts = collections.Counter(s)
+                return -sum((c/len(s)) * math.log2(c/len(s)) for c in counts.values())
+                
+            avg_entropy = sum(shannon_entropy(d) for d in domains) / diversity if diversity else 0
+            
+            ts_list = arrival_times[orig_h]
+            stddev = None
+            if len(ts_list) > 1:
+                gaps = [ts_list[i] - ts_list[i-1] for i in range(1, len(ts_list))]
+                mean_gap = sum(gaps) / len(gaps)
+                variance = sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)
+                stddev = math.sqrt(variance)
+                
+            alert['metrics'] = {
+                'diversity': diversity,
+                'avg_entropy': round(avg_entropy, 2),
+                'timing_stddev': round(stddev, 2) if stddev is not None else None
+            }
 
     return alerts
 
@@ -498,7 +536,7 @@ def _check_otx(ip):
         return None
 
 
-def enrich_ip(ip, event_count, local_intel, cache):
+def enrich_ip(ip, alert_data, local_intel, cache):
     """Multi-source enrichment: Manual Tag → Cache → AbuseIPDB → OTX → Heuristic."""
     if ip in local_intel:
         entry = local_intel[ip]
@@ -513,8 +551,28 @@ def enrich_ip(ip, event_count, local_intel, cache):
     try:
         ip_obj = ipaddress.ip_address(ip)
         if ip_obj.is_private or ip_obj.is_loopback:
-            # We do NOT fake a True/False Positive for private IPs based on a magic volume threshold.
-            # All unverified internal traffic requires human triage.
+            # Automated classification based on advanced metrics
+            metrics = alert_data.get('metrics')
+            event_count = alert_data.get('event_count', 0)
+            
+            if alert_data.get('detection_type') == 'dns_anomaly' and metrics:
+                diversity = metrics.get('diversity', 0)
+                entropy = metrics.get('avg_entropy', 0)
+                stddev = metrics.get('timing_stddev')
+                
+                # High volume + low diversity = Misconfigured App (False Positive)
+                if diversity < 5 and event_count > 50:
+                    return 'FALSE POSITIVE', 'Automated Triage (Misconfig)', {'reason': f'Low diversity ({diversity}) despite high volume'}
+
+                # High entropy + high diversity = DGA (True Positive)
+                if entropy > 3.5 and diversity > 50:
+                    return 'TRUE POSITIVE', 'Automated Triage (DGA/Beacon)', {'reason': f'High entropy ({entropy}) and diversity ({diversity})'}
+                
+                # Strict regularity = Slow Beacon (True Positive)
+                if stddev is not None and stddev < 2.0 and event_count >= 5:
+                    return 'TRUE POSITIVE', 'Automated Triage (Rigid Timing)', {'reason': f'Rigid beaconing (stddev {stddev}s)'}
+
+            # All other unverified internal traffic requires human triage.
             return 'UNKNOWN', 'Unverified (Private IP)', {'reason': 'Internal network, manual triage required'}
     except ValueError:
         return 'UNKNOWN', 'Invalid IP', {}
@@ -611,7 +669,7 @@ def main():
             
             def _enrich_worker(alert):
                 ip = alert['source_ip']
-                return ip, enrich_ip(ip, alert['event_count'], local_intel, cache)
+                return ip, enrich_ip(ip, alert, local_intel, cache)
                 
             intel_results = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:

@@ -217,28 +217,28 @@ class TestEvaluateRules:
 class TestEnrichIP:
     def test_manual_tag_priority(self):
         local = {'1.2.3.4': {'classification': 'TRUE POSITIVE', 'source': 'Manual Tag'}}
-        cls, src, _ = enrich_ip('1.2.3.4', 10, local, {})
+        cls, src, _ = enrich_ip('1.2.3.4', {'event_count': 10}, local, {})
         assert cls == 'TRUE POSITIVE'
         assert src == 'Manual Tag'
 
     def test_legacy_string_format(self):
         local = {'1.2.3.4': 'FALSE POSITIVE'}
-        cls, src, _ = enrich_ip('1.2.3.4', 10, local, {})
+        cls, src, _ = enrich_ip('1.2.3.4', {'event_count': 10}, local, {})
         assert cls == 'FALSE POSITIVE'
         assert src == 'Manual Tag'
 
     def test_private_ip_heuristic(self):
-        cls, src, _ = enrich_ip('192.168.1.1', 10, {}, {})
+        cls, src, _ = enrich_ip('192.168.1.1', {'event_count': 10}, {}, {})
         assert cls == 'UNKNOWN'
         assert src == 'Unverified (Private IP)'
 
     def test_private_ip_high_volume(self):
-        cls, src, _ = enrich_ip('192.168.1.1', 100, {}, {})
+        cls, src, _ = enrich_ip('192.168.1.1', {'event_count': 100}, {}, {})
         assert cls == 'UNKNOWN'
         assert src == 'Unverified (Private IP)'
 
     def test_invalid_ip(self):
-        cls, src, _ = enrich_ip('not-an-ip', 10, {}, {})
+        cls, src, _ = enrich_ip('not-an-ip', {'event_count': 10}, {}, {})
         assert cls == 'UNKNOWN'
         assert 'Invalid' in src
 
