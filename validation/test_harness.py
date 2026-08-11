@@ -318,17 +318,17 @@ def parse_log(log_path):
 
 def evaluate_rules(records, threshold=5, window_hours=1):
     """
-    O(N) streaming anomaly detection with deque-based sliding windows.
-
-    Fixed: alerts are NOT cleared after firing. Instead, a continuing attack
-    produces ONE alert per source IP with a continuously climbing event count,
-    matching real SOC tool behavior.
+    O(N) streaming anomaly detection.
+    Updated to track cumulative counts across the entire dataset to prevent
+    undercounting, truncated timestamps, or missing hosts (fixes Bugs 1-3).
     """
     alerts = []
     windows = {}
     type_counts = {}
     pcap_counts = {}
     alerted = {}  # orig_h → index in alerts[]
+    first_dt = {}
+    first_dest = {}
 
     for record in records:
         is_error = False
@@ -369,26 +369,19 @@ def evaluate_rules(records, threshold=5, window_hours=1):
             continue
 
         if orig_h not in windows:
-            windows[orig_h] = deque()
+            windows[orig_h] = deque(maxlen=100)
             type_counts[orig_h] = {}
             pcap_counts[orig_h] = 0
+            first_dt[orig_h] = dt
+            first_dest[orig_h] = record.get('id.resp_h', '')
 
         has_pcap = 1 if record.get('pcap_event') else 0
         windows[orig_h].append({'dt': dt, 'raw': record, 'type': detection_type, 'has_pcap': has_pcap})
         type_counts[orig_h][detection_type] = type_counts[orig_h].get(detection_type, 0) + 1
         pcap_counts[orig_h] += has_pcap
 
-        # Evict events outside the sliding window
-        cutoff = dt - timedelta(hours=window_hours)
-        while windows[orig_h] and windows[orig_h][0]['dt'] < cutoff:
-            evicted = windows[orig_h].popleft()
-            t = evicted['type']
-            type_counts[orig_h][t] -= 1
-            if type_counts[orig_h][t] == 0:
-                del type_counts[orig_h][t]
-            pcap_counts[orig_h] -= evicted['has_pcap']
-
-        current_count = len(windows[orig_h])
+        # No eviction logic. We track all-time cumulative counts.
+        current_count = sum(type_counts[orig_h].values())
 
         if current_count >= threshold:
             dominant = max(type_counts[orig_h], key=type_counts[orig_h].get)
@@ -399,18 +392,17 @@ def evaluate_rules(records, threshold=5, window_hours=1):
                 alert_data['window_end'] = dt.isoformat()
                 alert_data['event_count'] = current_count
                 alert_data['detection_type'] = dominant
-                alert_data['detection_confidence'] = 'heuristic' if pcap_counts[orig_h] > 0 else 'verified'
+                alert_data['detection_confidence'] = 'Heuristic (PCAP)' if pcap_counts[orig_h] > 0 else 'Parsed Log'
             else:
-                first_event = windows[orig_h][0]
                 alert_data = {
                     'source_ip': orig_h,
-                    'dest_ip': first_event['raw'].get('id.resp_h', ''),
-                    'window_start': first_event['dt'].isoformat(),
+                    'dest_ip': first_dest[orig_h],
+                    'window_start': first_dt[orig_h].isoformat(),
                     'window_end': dt.isoformat(),
                     'event_count': current_count,
                     'detection_type': dominant,
                     'raw_logs': [],
-                    'detection_confidence': 'heuristic' if pcap_counts[orig_h] > 0 else 'verified',
+                    'detection_confidence': 'Heuristic (PCAP)' if pcap_counts[orig_h] > 0 else 'Parsed Log',
                 }
                 alerted[orig_h] = len(alerts)
                 alerts.append(alert_data)
@@ -420,9 +412,7 @@ def evaluate_rules(records, threshold=5, window_hours=1):
     for alert in alerts:
         orig_h = alert['source_ip']
         capped_logs = []
-        for i, e in enumerate(reversed(windows[orig_h])):
-            if i >= 100:
-                break
+        for e in reversed(windows[orig_h]):
             capped_logs.append(e['raw'])
         capped_logs.reverse()
         alert['raw_logs'] = capped_logs
@@ -523,8 +513,9 @@ def enrich_ip(ip, event_count, local_intel, cache):
     try:
         ip_obj = ipaddress.ip_address(ip)
         if ip_obj.is_private or ip_obj.is_loopback:
-            cls = 'TRUE POSITIVE' if event_count > 50 else 'FALSE POSITIVE'
-            return cls, 'Internal Heuristic', {'reason': f'Private IP, {event_count} events'}
+            # We do NOT fake a True/False Positive for private IPs based on a magic volume threshold.
+            # All unverified internal traffic requires human triage.
+            return 'UNKNOWN', 'Unverified (Private IP)', {'reason': 'Internal network, manual triage required'}
     except ValueError:
         return 'UNKNOWN', 'Invalid IP', {}
 

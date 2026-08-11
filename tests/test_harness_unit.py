@@ -203,13 +203,13 @@ class TestEvaluateRules:
         events = [{'ts': str(1000 + i), 'id.orig_h': '5.5.5.5', 'auth_success': False, 'pcap_event': 'syn'} for i in range(15)]
         alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
         assert len(alerts) == 1
-        assert alerts[0]['detection_confidence'] == 'heuristic'
+        assert alerts[0]['detection_confidence'] == 'Heuristic (PCAP)'
 
     def test_non_pcap_verified_confidence(self):
         events = self._make_ssh_events('6.6.6.6', 15)
         alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
         assert len(alerts) == 1
-        assert alerts[0]['detection_confidence'] == 'verified'
+        assert alerts[0]['detection_confidence'] == 'Parsed Log'
 
 
 # ── Threat Intel Tests ─────────────────────────────────────────────────────────
@@ -229,13 +229,13 @@ class TestEnrichIP:
 
     def test_private_ip_heuristic(self):
         cls, src, _ = enrich_ip('192.168.1.1', 10, {}, {})
-        assert cls == 'FALSE POSITIVE'
-        assert src == 'Internal Heuristic'
+        assert cls == 'UNKNOWN'
+        assert src == 'Unverified (Private IP)'
 
     def test_private_ip_high_volume(self):
         cls, src, _ = enrich_ip('192.168.1.1', 100, {}, {})
-        assert cls == 'TRUE POSITIVE'
-        assert src == 'Internal Heuristic'
+        assert cls == 'UNKNOWN'
+        assert src == 'Unverified (Private IP)'
 
     def test_invalid_ip(self):
         cls, src, _ = enrich_ip('not-an-ip', 10, {}, {})
