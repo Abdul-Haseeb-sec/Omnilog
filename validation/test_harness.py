@@ -341,14 +341,20 @@ def evaluate_rules(records, threshold=15, window_hours=1):
         if current_count >= threshold:
             dominant = max(type_counts[orig_h], key=type_counts[orig_h].get)
 
-            # Cap raw_logs to last 100 to avoid huge reports
-            q_list = list(windows[orig_h])
-            capped_logs = [e['raw'] for e in q_list[-100:]]
+            # Cap raw_logs to last 100 to avoid huge reports (O(1) extraction)
+            capped_logs = []
+            for i, e in enumerate(reversed(windows[orig_h])):
+                if i >= 100:
+                    break
+                capped_logs.append(e['raw'])
+            capped_logs.reverse()
+
+            first_event = windows[orig_h][0]
 
             alert_data = {
                 'source_ip': orig_h,
-                'dest_ip': q_list[0]['raw'].get('id.resp_h', ''),
-                'window_start': q_list[0]['dt'].isoformat(),
+                'dest_ip': first_event['raw'].get('id.resp_h', ''),
+                'window_start': first_event['dt'].isoformat(),
                 'window_end': dt.isoformat(),
                 'event_count': current_count,
                 'detection_type': dominant,
@@ -551,6 +557,19 @@ def main():
         local_intel = _load_json('threat_intel.json')
         cache = _load_json(INTEL_CACHE_FILE)
 
+        if not gt_records:
+            log.info("Enriching %d IPs via Threat Intel...", len(alerts))
+            import concurrent.futures
+            
+            def _enrich_worker(alert):
+                ip = alert['source_ip']
+                return ip, enrich_ip(ip, alert['event_count'], local_intel, cache)
+                
+            intel_results = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                for ip, (cls, source, details) in executor.map(_enrich_worker, alerts):
+                    intel_results[ip] = (cls, source, details)
+
         for alert in alerts:
             ip = alert['source_ip']
             start = parse_isoformat(alert['window_start'])
@@ -566,7 +585,7 @@ def main():
                 alert['classification_source'] = 'Ground Truth'
                 alert['intel_details'] = {}
             else:
-                cls, source, details = enrich_ip(ip, alert['event_count'], local_intel, cache)
+                cls, source, details = intel_results[ip]
                 alert['classification'] = cls
                 alert['classification_source'] = source
                 alert['intel_details'] = details
