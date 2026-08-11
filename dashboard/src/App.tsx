@@ -1,223 +1,438 @@
-import { useState, useRef } from 'react'
-import { ShieldAlert, Activity, Upload, Download, FileJson } from 'lucide-react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { ShieldAlert, Activity, Upload, Download, FileJson, Globe, Beaker, Database, History, Trash2 } from 'lucide-react'
 import './index.css'
 
+interface Alert {
+  source_ip: string
+  dest_ip?: string
+  classification: string
+  classification_source?: string
+  detection_type?: string
+  detection_label?: string
+  detection_confidence?: string
+  window_start: string
+  window_end: string
+  event_count: number
+  raw_logs?: Record<string, unknown>[]
+  intel_details?: Record<string, unknown>
+}
+
+interface Report {
+  timestamp: string
+  mode: string
+  rule_id: string
+  rule_name: string
+  threshold: number
+  alerts: Alert[]
+  pcap_stats?: Record<string, number>
+  request_id?: string
+}
+
+interface RunSummary {
+  id: string
+  timestamp: string
+  mode: string
+  alert_count: number
+  rule_name: string
+}
+
+const API = 'http://localhost:5000'
+
 function App() {
-  const [report, setReport] = useState<any>(null)
-  const [selectedLog, setSelectedLog] = useState<any>(null)
-  const [loading, setLoading] = useState<boolean>(false)
+  const [report, setReport] = useState<Report | null>(null)
+  const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [showIntel, setShowIntel] = useState(false)
+  const [intelData, setIntelData] = useState<Record<string, unknown>>({})
+  const [showHistory, setShowHistory] = useState(false)
+  const [runs, setRuns] = useState<RunSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval>
+    if (loading) {
+      setProgress(0)
+      interval = setInterval(() => setProgress(p => (p >= 98 ? 98 : p + 0.5)), 20)
+    } else {
+      setProgress(100)
+      const t = setTimeout(() => setProgress(0), 400)
+      return () => { clearInterval(interval); clearTimeout(t) }
+    }
+    return () => clearInterval(interval)
+  }, [loading])
+
+  const loadIntel = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/threat_intel`)
+      if (res.ok) setIntelData(await res.json())
+    } catch { /* backend offline */ }
+  }, [])
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/reports`)
+      if (res.ok) setRuns(await res.json())
+    } catch { /* backend offline */ }
+  }, [])
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-
     setLoading(true)
-    const formData = new FormData()
-    formData.append('file', file)
-
+    const fd = new FormData()
+    fd.append('file', file)
     try {
-      const response = await fetch('http://localhost:5000/upload', {
-        method: 'POST',
-        body: formData,
-      })
-      
-      if (!response.ok) {
-        const err = await response.json()
+      const res = await fetch(`${API}/upload`, { method: 'POST', body: fd })
+      if (!res.ok) {
+        const err = await res.json()
         alert('Error: ' + err.error + (err.logs ? '\n\nLogs:\n' + err.logs : ''))
         setLoading(false)
         return
       }
-      
-      const data = await response.json()
-      setReport(data)
-    } catch (err) {
-      alert("Failed to connect to backend engine. Ensure api_server.py is running on port 5000.")
+      setReport(await res.json())
+    } catch {
+      alert('Cannot connect to backend. Ensure api_server.py is running on port 5000.')
     }
     setLoading(false)
-    
-    // Reset input so the same file can be uploaded again if needed
     if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const loadReport = async (id: string) => {
+    try {
+      const res = await fetch(`${API}/reports/${id}`)
+      if (res.ok) { setReport(await res.json()); setShowHistory(false) }
+    } catch { alert('Failed to load report') }
   }
 
   const exportCSV = () => {
     if (!report) return
-    const headers = "Source IP,Classification,Start Time,End Time,Event Count\n"
-    const rows = report.alerts.map((a: any) => 
-      `${a.source_ip},${a.classification},${a.window_start},${a.window_end},${a.event_count}`
-    ).join("\n")
-    
-    const blob = new Blob([headers + rows], { type: 'text/csv' })
+    const h = 'Source IP,Classification,Source,Detection Type,Confidence,Start Time,End Time,Event Count\n'
+    const rows = report.alerts.map(a =>
+      `${a.source_ip},${a.classification},${a.classification_source || ''},${a.detection_label || ''},${a.detection_confidence || ''},${a.window_start},${a.window_end},${a.event_count}`
+    ).join('\n')
+    const blob = new Blob([h + rows], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `validation_export_${Date.now()}.csv`
-    a.click()
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `omnilog_export_${Date.now()}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
   }
 
-  const handleMarkIntel = async (ip: string, classification: string) => {
+  const handleTag = async (ip: string, classification: string) => {
     try {
-      const formData = new FormData()
-      formData.append('ip', ip)
-      formData.append('classification', classification)
-
-      const response = await fetch('http://localhost:5000/mark_intel', {
+      const res = await fetch(`${API}/mark_intel`, {
         method: 'POST',
-        body: formData
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip, classification }),
       })
-      if (response.ok) {
-        // Optimistically update the UI without reloading the file
-        const newReport = { ...report }
-        newReport.alerts = newReport.alerts.map((a: any) => {
-          if (a.source_ip === ip) {
-            return { ...a, classification }
-          }
-          return a
-        })
-        setReport(newReport)
-      } else {
-        alert('Failed to update Threat Intel Database. Server returned ' + response.status)
-      }
-    } catch (e: any) {
-      alert('Network Error connecting to engine: ' + e.message)
-    }
+      if (res.ok) {
+        setReport(prev => prev ? {
+          ...prev,
+          alerts: prev.alerts.map(a => a.source_ip === ip ? { ...a, classification, classification_source: 'Manual Tag' } : a),
+        } : prev)
+        if (selectedAlert?.source_ip === ip)
+          setSelectedAlert(prev => prev ? { ...prev, classification, classification_source: 'Manual Tag' } : prev)
+      } else { alert('Failed: ' + res.status) }
+    } catch (err: unknown) { alert('Network error: ' + (err instanceof Error ? err.message : String(err))) }
   }
 
-  // Calculate metrics dynamically
-  const tpCount = report?.alerts.filter((a: any) => a.classification === 'TRUE POSITIVE').length || 0
-  const fpCount = report?.alerts.filter((a: any) => a.classification === 'FALSE POSITIVE').length || 0
+  const deleteIntel = async (ip: string) => {
+    try {
+      const res = await fetch(`${API}/threat_intel/${ip}`, { method: 'DELETE' })
+      if (res.ok) { const next = { ...intelData }; delete next[ip]; setIntelData(next) }
+    } catch { /* ignore */ }
+  }
+
+  const tpCount = report?.alerts.filter(a => a.classification === 'TRUE POSITIVE').length ?? 0
+  const fpCount = report?.alerts.filter(a => a.classification === 'FALSE POSITIVE').length ?? 0
+  const unkCount = report?.alerts.filter(a => a.classification === 'UNKNOWN').length ?? 0
+
+  const fmtTs = (iso: string) => iso.replace('T', ' ').substring(0, 19)
+
+  const describeEvent = (log: Record<string, unknown>): string => {
+    if (log.service === 'ssh' || log.auth_success !== undefined)
+      return `SSH auth ${log.auth_success === true || log.auth_success === 'T' ? 'success' : 'attempt (failed)'}${log.username ? ` [${log.username}]` : ''}`
+    if (log.service === 'dns')
+      return `DNS ${log.rcode_name || ''}${log.query ? ` — ${log.query}` : ''}`
+    if (log.service === 'http')
+      return `HTTP ${log.status_code || ''}`
+    if (log.service === 'windows')
+      return `Windows Event ${log.event_id || ''} (${log.auth_success === false ? 'failed logon' : 'logon'})`
+    if (log.pcap_event === 'syn')
+      return `TCP SYN → port ${log['id.resp_p'] || '?'}`
+    return 'Network event'
+  }
 
   return (
     <div className="dashboard-container">
-      
-      {/* Modal for Raw Logs */}
-      {selectedLog && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(11, 14, 20, 0.9)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }} onClick={() => setSelectedLog(null)}>
-          <div style={{ background: 'var(--surface)', padding: '2rem', border: '1px solid var(--hairline)', borderRadius: '8px', maxWidth: '900px', width: '90%', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem', borderBottom: '1px solid var(--hairline)', paddingBottom: '1rem' }}>
-              <h3 style={{ fontFamily: 'ui-monospace, monospace' }}>Raw Log Inspection</h3>
-              <button onClick={() => setSelectedLog(null)} style={{ color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer' }}>[ Close Modal ]</button>
+
+      {/* ── Alert Detail Modal ─────────────────────────────────── */}
+      {selectedAlert && (
+        <div className="modal-overlay" onClick={() => setSelectedAlert(null)}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Alert Detail — {selectedAlert.source_ip}</h3>
+              <button className="modal-close-btn" onClick={() => setSelectedAlert(null)}>[ Close ]</button>
             </div>
-            <div style={{ overflowY: 'auto', flexGrow: 1 }}>
-              <pre className="data-text" style={{ color: 'var(--text-muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                {JSON.stringify(selectedLog, null, 2)}
-              </pre>
+            <div className="modal-body">
+              <div className="detail-grid">
+                <div className="detail-item">
+                  <span className="detail-label">Classification</span>
+                  <span className="detail-value">
+                    <span className={`badge ${selectedAlert.classification === 'TRUE POSITIVE' ? 'critical' : selectedAlert.classification === 'FALSE POSITIVE' ? 'warn' : 'ok'}`}>
+                      {selectedAlert.classification}
+                    </span>
+                    {selectedAlert.classification_source && <span className="source-tag">{selectedAlert.classification_source}</span>}
+                  </span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Detection Rule</span>
+                  <span className="detail-value">{selectedAlert.detection_label || selectedAlert.detection_type || 'Generic'}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Source IP</span>
+                  <span className="detail-value">{selectedAlert.source_ip}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Destination</span>
+                  <span className="detail-value">{selectedAlert.dest_ip || '—'}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Time Window</span>
+                  <span className="detail-value">{fmtTs(selectedAlert.window_start)} → {fmtTs(selectedAlert.window_end)}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="detail-label">Confidence</span>
+                  <span className="detail-value">
+                    <span className={`badge ${selectedAlert.detection_confidence === 'verified' ? 'ok' : 'info'}`}>
+                      {selectedAlert.detection_confidence || 'verified'}
+                    </span>
+                    {selectedAlert.detection_confidence === 'heuristic' && (
+                      <span className="source-tag" title="PCAP SSH detection counts connection attempts (SYN packets), not actual auth results — SSH traffic is encrypted">⚠ PCAP heuristic</span>
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              {selectedAlert.intel_details && Object.keys(selectedAlert.intel_details).length > 0 && (
+                <div className="detail-section">
+                  <div className="detail-section-title">Threat Intelligence</div>
+                  <div className="detail-grid">
+                    {Object.entries(selectedAlert.intel_details).map(([k, v]) => (
+                      <div className="detail-item" key={k}>
+                        <span className="detail-label">{k.replace(/_/g, ' ')}</span>
+                        <span className="detail-value">{String(v)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedAlert.raw_logs && selectedAlert.raw_logs.length > 0 && (
+                <div className="detail-section">
+                  <div className="detail-section-title">Event Timeline ({selectedAlert.raw_logs.length}{selectedAlert.event_count > selectedAlert.raw_logs.length ? ` of ${selectedAlert.event_count}` : ''} events)</div>
+                  <ul className="detail-timeline">
+                    {selectedAlert.raw_logs.map((log, i) => {
+                      const ts = log.ts ? new Date(Number(log.ts) * 1000).toISOString().replace('T', ' ').substring(0, 19) : '—'
+                      return <li key={i}><span className="ts">{ts} UTC</span><span className="event">{describeEvent(log)}</span></li>
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              <div className="detail-actions">
+                <button className="tag-btn tag-btn-danger" onClick={() => handleTag(selectedAlert.source_ip, 'TRUE POSITIVE')}>Tag Malicious</button>
+                <button className="tag-btn tag-btn-safe" onClick={() => handleTag(selectedAlert.source_ip, 'FALSE POSITIVE')}>Tag Safe</button>
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Header */}
-      <header className="header flex-between" style={{ paddingBottom: '1.5rem', borderBottom: '1px solid var(--hairline)', marginBottom: '1.5rem' }}>
+      {/* ── Threat Intel Browser Modal ────────────────────────── */}
+      {showIntel && (
+        <div className="modal-overlay" onClick={() => setShowIntel(false)}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Threat Intel Database</h3>
+              <button className="modal-close-btn" onClick={() => setShowIntel(false)}>[ Close ]</button>
+            </div>
+            <div className="modal-body">
+              {Object.keys(intelData).length === 0 ? (
+                <div className="empty-state">No IPs tagged yet. Use TAG BAD / TAG SAFE on alerts to build your database.</div>
+              ) : (
+                <table className="data-table">
+                  <thead><tr><th>IP Address</th><th>Classification</th><th>Source</th><th>Remove</th></tr></thead>
+                  <tbody>
+                    {Object.entries(intelData).map(([ip, val]) => {
+                      const cls = typeof val === 'object' && val !== null ? (val as Record<string, string>).classification : String(val)
+                      const src = typeof val === 'object' && val !== null ? (val as Record<string, string>).source : 'Legacy'
+                      return (
+                        <tr key={ip}>
+                          <td className="data-text">{ip}</td>
+                          <td><span className={`badge ${cls === 'TRUE POSITIVE' ? 'critical' : 'warn'}`}>{cls}</span></td>
+                          <td className="data-text">{src || '—'}</td>
+                          <td>
+                            <button className="raw-log-btn" onClick={() => deleteIntel(ip)} title="Remove from database">
+                              <Trash2 size={16} color="var(--critical)" />
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Run History Modal ─────────────────────────────────── */}
+      {showHistory && (
+        <div className="modal-overlay" onClick={() => setShowHistory(false)}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Analysis History</h3>
+              <button className="modal-close-btn" onClick={() => setShowHistory(false)}>[ Close ]</button>
+            </div>
+            <div className="modal-body">
+              {runs.length === 0 ? (
+                <div className="empty-state">No past analyses found. Upload a file to create the first run.</div>
+              ) : (
+                <table className="data-table">
+                  <thead><tr><th>Timestamp</th><th>Mode</th><th>Alerts</th><th>Load</th></tr></thead>
+                  <tbody>
+                    {runs.map(r => (
+                      <tr key={r.id}>
+                        <td className="data-text">{fmtTs(r.timestamp)} UTC</td>
+                        <td><span className={`badge ${r.mode === 'lab' ? 'warn' : 'info'}`}>{r.mode}</span></td>
+                        <td className="data-text">{r.alert_count}</td>
+                        <td>
+                          <button className="tag-btn tag-btn-safe" onClick={() => loadReport(r.id)}>Load</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Header ───────────────────────────────────────────── */}
+      <header className="header">
         <div>
           <h1>Adversary Emulation Lab</h1>
-          <p className="text-muted">Detection Validation Harness & Telemetry Viewer</p>
+          <p className="text-muted">OmniLog Detection Harness &amp; Telemetry Viewer</p>
         </div>
         <div className="flex-center gap-sm">
-          <input 
-            type="file" 
-            accept=".json,.log,.tsv,.csv,.gz,.pcap" 
-            style={{ display: 'none' }} 
+          <input
+            type="file"
+            accept=".json,.jsonl,.log,.tsv,.csv,.gz,.pcap,.xml,.txt"
+            style={{ display: 'none' }}
             ref={fileInputRef}
-            onChange={handleFileUpload}
+            onChange={handleUpload}
             disabled={loading}
           />
-          <button 
-            onClick={() => fileInputRef.current?.click()}
-            disabled={loading}
-            style={{ padding: '8px 16px', background: 'transparent', border: '1px dashed var(--signal)', color: 'var(--signal)', display: 'flex', alignItems: 'center', gap: '8px', cursor: loading ? 'not-allowed' : 'pointer', borderRadius: '4px', opacity: loading ? 0.7 : 1 }}
-          >
-            <Upload size={16} /> {loading ? 'Analyzing Data...' : 'Upload Data (.log/.csv/.gz)'}
+          {loading ? (
+            <div className="upload-progress">
+              <div className="upload-progress-bar" style={{ width: `${progress}%` }} />
+              <Activity size={16} className="spin upload-progress-text" />
+              <span className="upload-progress-text">Analyzing... {Math.round(progress)}%</span>
+            </div>
+          ) : (
+            <button className="upload-btn" onClick={() => fileInputRef.current?.click()}>
+              <Upload size={16} /> Upload Data
+            </button>
+          )}
+          <button className="export-btn" onClick={() => { loadIntel(); setShowIntel(true) }} title="Browse Threat Intel Database">
+            <Database size={16} /> Intel DB
           </button>
-          <button 
-            onClick={exportCSV}
-            disabled={!report}
-            style={{ padding: '8px 16px', background: 'transparent', border: '1px solid var(--hairline)', color: report ? 'var(--text-primary)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '8px', cursor: report ? 'pointer' : 'not-allowed', borderRadius: '4px' }}
-          >
+          <button className="export-btn" onClick={() => { loadHistory(); setShowHistory(true) }} title="View past analysis runs">
+            <History size={16} /> History
+          </button>
+          <button className="export-btn" onClick={exportCSV} disabled={!report}>
             <Download size={16} /> Export CSV
           </button>
         </div>
       </header>
 
-      {/* Top Stats */}
+      {/* ── Mode Banner ──────────────────────────────────────── */}
+      {report && (
+        <div className={`mode-banner ${report.mode === 'lab' ? 'lab' : 'live'}`}>
+          {report.mode === 'lab'
+            ? <><Beaker size={14} /> Lab Validation Mode — classifications verified against ground truth</>
+            : <><Globe size={14} /> Live Analysis Mode — classifications from real threat intelligence</>}
+        </div>
+      )}
+
+      {/* ── Stats Grid ───────────────────────────────────────── */}
       <div className="stats-grid">
         <div className="stat-card">
-          <div className="stat-label">Active Sensors</div>
-          <div className={`stat-value flex-center ${report ? 'text-primary' : 'text-muted'}`}>
-            <Activity size={24} color={report ? "var(--ok)" : "var(--text-muted)"} /> {report ? 1 : '-'}
-          </div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">Rules Evaluated</div>
-          <div className={`stat-value ${report ? 'text-primary' : 'text-muted'}`}>
-            {report ? 1 : '-'}
-          </div>
+          <div className="stat-label">Total Alerts</div>
+          <div className={`stat-value ${report ? 'text-primary' : 'text-muted'}`}>{report ? report.alerts.length : '—'}</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">True Positives</div>
-          <div className={`stat-value ${tpCount > 0 ? 'text-critical' : 'text-muted'}`}>
-            {report ? tpCount : '-'}
-          </div>
+          <div className={`stat-value ${tpCount > 0 ? 'text-critical' : 'text-muted'}`}>{report ? tpCount : '—'}</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">False Positives</div>
-          <div className={`stat-value ${fpCount > 0 ? 'text-warn' : (report ? 'text-ok' : 'text-muted')}`}>
-            {report ? fpCount : '-'}
-          </div>
+          <div className={`stat-value ${fpCount > 0 ? 'text-warn' : (report ? 'text-ok' : 'text-muted')}`}>{report ? fpCount : '—'}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Needs Review</div>
+          <div className={`stat-value ${unkCount > 0 ? 'text-warn' : 'text-muted'}`}>{report ? unkCount : '—'}</div>
         </div>
       </div>
 
-      {/* Main Content Area */}
+      {/* ── Content Grid ─────────────────────────────────────── */}
       <div className="content-grid">
-        
-        {/* Left Panel: Recent Alerts */}
         <div className="panel" style={{ overflow: 'hidden' }}>
           <div className="panel-title flex-between">
             <span className="flex-center gap-sm"><ShieldAlert size={16} /> Validated Alerts</span>
-            <span className="data-text">{report ? report.timestamp.replace('T', ' ').substring(0, 19) + ' UTC' : 'Awaiting data'}</span>
+            <span className="data-text">{report ? fmtTs(report.timestamp) + ' UTC' : 'Awaiting data'}</span>
           </div>
-          
-          {!report ? (
-             <div className="empty-state">
-               [ No telemetry ingested. Please click "Load validation_report.json" ]
-             </div>
+
+          {loading ? (
+            <div>{[...Array(4)].map((_, i) => <div key={i} className="skeleton-row" />)}</div>
+          ) : !report ? (
+            <div className="empty-state">Upload a log file, PCAP, XML export, or syslog to begin analysis</div>
           ) : report.alerts.length === 0 ? (
-             <div className="empty-state" style={{ border: 'none' }}>
-               [ Validation complete. No alerts generated for this dataset. ]
-             </div>
+            <div className="empty-state" style={{ border: 'none' }}>No alerts generated for this dataset</div>
           ) : (
             <div style={{ overflowX: 'auto' }}>
               <table className="data-table">
                 <thead>
-                  <tr>
-                    <th>Class</th>
-                    <th>Source IP</th>
-                    <th>Start Window (UTC)</th>
-                    <th>Event Count</th>
-                    <th>Raw</th>
-                  </tr>
+                  <tr><th>Class</th><th>Source IP</th><th>Detection</th><th>Events</th><th>Actions</th></tr>
                 </thead>
                 <tbody>
-                  {report.alerts.map((a: any, i: number) => (
+                  {report.alerts.map((a, i) => (
                     <tr key={i}>
                       <td>
                         <span className={`badge ${a.classification === 'TRUE POSITIVE' ? 'critical' : a.classification === 'FALSE POSITIVE' ? 'warn' : 'ok'}`}>
                           {a.classification}
                         </span>
+                        {a.classification_source && <span className="source-tag">{a.classification_source}</span>}
+                        {a.detection_confidence === 'heuristic' && <span className="source-tag" title="Heuristic detection from PCAP data">⚠</span>}
                       </td>
-                      <td className="data-text" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '150px' }} title={a.source_ip}>{a.source_ip}</td>
-                      <td className="data-text" style={{ whiteSpace: 'nowrap' }}>{a.window_start.replace('T', ' ').substring(0, 19)}</td>
+                      <td className="data-text" title={a.source_ip}>{a.source_ip}</td>
+                      <td className="data-text" title={a.detection_label}>{a.detection_label?.split('(')[0]?.trim() || a.detection_type || '—'}</td>
                       <td className="data-text">{a.event_count}</td>
                       <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                          <button onClick={() => setSelectedLog(a.raw_logs)} title="View Raw Zeek Logs" style={{ cursor: 'pointer', background: 'none', border: 'none', padding: 0 }}>
-                            <FileJson size={18} color="var(--signal)" style={{ opacity: 0.8 }} />
+                        <div className="flex-center">
+                          <button className="raw-log-btn" onClick={() => setSelectedAlert(a)} title="View Alert Detail">
+                            <FileJson size={18} color="var(--signal)" />
                           </button>
                           {a.classification === 'UNKNOWN' && (
-                             <div style={{ display: 'flex', gap: '8px' }}>
-                               <button onClick={() => handleMarkIntel(a.source_ip, 'TRUE POSITIVE')} title="Tag as Malicious in Threat Intel" style={{ cursor: 'pointer', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#f87171', borderRadius: '4px', padding: '4px 10px', fontSize: '10px', fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase', transition: 'all 0.2s', boxShadow: '0 0 10px rgba(239, 68, 68, 0.1)' }}>TAG BAD</button>
-                               <button onClick={() => handleMarkIntel(a.source_ip, 'FALSE POSITIVE')} title="Tag as Safe in Threat Intel" style={{ cursor: 'pointer', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.4)', color: '#34d399', borderRadius: '4px', padding: '4px 10px', fontSize: '10px', fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase', transition: 'all 0.2s', boxShadow: '0 0 10px rgba(16, 185, 129, 0.1)' }}>TAG SAFE</button>
-                             </div>
+                            <>
+                              <button className="tag-btn tag-btn-danger" onClick={() => handleTag(a.source_ip, 'TRUE POSITIVE')}>BAD</button>
+                              <button className="tag-btn tag-btn-safe" onClick={() => handleTag(a.source_ip, 'FALSE POSITIVE')}>SAFE</button>
+                            </>
                           )}
                         </div>
                       </td>
@@ -229,29 +444,56 @@ function App() {
           )}
         </div>
 
-        {/* Right Panel: Rule Efficacy */}
+        {/* Right Panel */}
         <div className="panel">
           <div className="panel-title">Rule Efficacy Summary</div>
-          
           {!report ? (
-            <div className="empty-state">
-              [ Awaiting validation results ]
-            </div>
+            <div className="empty-state">Awaiting validation results</div>
           ) : (
-            <div style={{ borderBottom: '1px solid var(--hairline)', paddingBottom: '1rem' }}>
-              <div style={{ fontSize: '0.875rem', margin: '0.5rem 0' }}>{report.rule_name}</div>
-              <div className="flex-between" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                <span>Threshold: &gt;={report.threshold}</span>
-                <span className={fpCount > 0 ? 'text-warn' : 'text-ok'}>
-                  {tpCount} TP / {fpCount} FP
-                </span>
+            <>
+              <div className="rule-summary">
+                <div className="rule-name">{report.rule_name}</div>
+                <div className="rule-meta flex-between">
+                  <span>Threshold: ≥{report.threshold}</span>
+                  <span className={fpCount > 0 ? 'text-warn' : 'text-ok'}>{tpCount} TP / {fpCount} FP / {unkCount} UNK</span>
+                </div>
               </div>
-            </div>
+
+              {report.pcap_stats && (
+                <div className="detail-section">
+                  <div className="detail-section-title">PCAP Extraction Stats</div>
+                  <div className="detail-grid">
+                    {Object.entries(report.pcap_stats).map(([k, v]) => (
+                      <div className="detail-item" key={k}>
+                        <span className="detail-label">{k.replace(/_/g, ' ')}</span>
+                        <span className="detail-value">{v?.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {report.alerts.length > 0 && (
+                <div className="detail-section">
+                  <div className="detail-section-title">Alert Breakdown</div>
+                  {Object.entries(
+                    report.alerts.reduce<Record<string, number>>((acc, a) => {
+                      const key = a.detection_label || a.detection_type || 'Unknown'
+                      acc[key] = (acc[key] || 0) + 1
+                      return acc
+                    }, {})
+                  ).map(([type, count]) => (
+                    <div key={type} className="flex-between" style={{ fontSize: '0.8rem', marginBottom: '0.4rem' }}>
+                      <span className="text-muted">{type}</span>
+                      <span className="data-text">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
-
       </div>
-
     </div>
   )
 }

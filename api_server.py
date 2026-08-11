@@ -1,77 +1,371 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+#!/usr/bin/env python3
+"""
+OmniLog Validation API Server
+Handles file upload, native PCAP parsing, and detection orchestration.
+Security-hardened: sanitized filenames, size caps, CORS lockdown, input validation.
+"""
 import os
-import tempfile
-import gzip
-import shutil
-import subprocess
+import sys
 import json
+import gzip
+import uuid
+import shutil
+import socket
+import logging
+import tempfile
+import ipaddress
 import subprocess
 
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+import dpkt
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+load_dotenv()
+
+ALLOWED_ORIGINS = [
+    o.strip() for o in
+    os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+]
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
+API_PORT = int(os.getenv("API_PORT", "5000"))
+SUBPROCESS_TIMEOUT = int(os.getenv("SUBPROCESS_TIMEOUT", "120"))
+
+ALLOWED_EXTENSIONS = ('.log', '.csv', '.tsv', '.json', '.jsonl', '.gz', '.txt', '.pcap', '.xml')
+VALID_CLASSIFICATIONS = frozenset({"TRUE POSITIVE", "FALSE POSITIVE"})
+REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reports')
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("omnilog")
+
+# ── Flask App ──────────────────────────────────────────────────────────────────
+# WARNING: This server has NO authentication. It is designed for localhost use
+# only. Do NOT expose port 5000 on a network without adding auth first.
 app = Flask(__name__)
-CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
+CORS(app, origins=ALLOWED_ORIGINS)
+os.makedirs(REPORTS_DIR, exist_ok=True)
+
+
+# ── PCAP Extraction ────────────────────────────────────────────────────────────
+
+def _open_pcap(fobj):
+    """Try pcap then pcapng format."""
+    try:
+        return dpkt.pcap.Reader(fobj)
+    except ValueError:
+        fobj.seek(0)
+        return dpkt.pcapng.Reader(fobj)
+
+
+def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
+    """
+    Parse raw PCAP into connection-level JSONL events the harness understands.
+
+    Extracts:
+      • TCP SYN packets  → connection attempts (SSH on port 22 → auth_success=False)
+      • DNS responses     → rcode_name for NXDOMAIN/SERVFAIL detection
+      • HTTP responses    → status_code for 4xx/5xx detection
+    """
+    stats = {"tcp_connections": 0, "dns_events": 0, "http_events": 0,
+             "packets_read": 0, "errors": 0}
+
+    with open(pcap_path, 'rb') as f:
+        pcap = _open_pcap(f)
+
+        with open(output_path, 'w', encoding='utf-8') as out:
+            for ts, buf in pcap:
+                stats["packets_read"] += 1
+                try:
+                    # Ethernet → IP, fallback to raw IP
+                    try:
+                        eth = dpkt.ethernet.Ethernet(buf)
+                        ip_pkt = eth.data
+                    except (dpkt.UnpackError, dpkt.NeedData):
+                        ip_pkt = dpkt.ip.IP(buf)
+
+                    if not isinstance(ip_pkt, dpkt.ip.IP):
+                        continue
+
+                    src = socket.inet_ntoa(ip_pkt.src)
+                    dst = socket.inet_ntoa(ip_pkt.dst)
+
+                    # ── TCP ────────────────────────────────────────────────
+                    if isinstance(ip_pkt.data, dpkt.tcp.TCP):
+                        tcp = ip_pkt.data
+                        is_syn = bool(tcp.flags & dpkt.tcp.TH_SYN) and not bool(tcp.flags & dpkt.tcp.TH_ACK)
+
+                        if is_syn:
+                            rec = {"ts": ts, "id.orig_h": src, "id.resp_h": dst,
+                                   "id.resp_p": tcp.dport, "proto": "tcp",
+                                   "pcap_event": "syn"}
+                            if tcp.dport == 22:
+                                rec["service"] = "ssh"
+                                rec["auth_success"] = False
+                            out.write(json.dumps(rec) + '\n')
+                            stats["tcp_connections"] += 1
+
+                        # HTTP response parsing (ports 80/8080/8000)
+                        if tcp.sport in (80, 8080, 8000) and tcp.data:
+                            try:
+                                if tcp.data[:4] == b'HTTP':
+                                    resp = dpkt.http.Response(tcp.data)
+                                    out.write(json.dumps({
+                                        "ts": ts, "id.orig_h": dst,
+                                        "id.resp_h": src, "id.resp_p": tcp.sport,
+                                        "proto": "tcp", "service": "http",
+                                        "status_code": resp.status,
+                                    }) + '\n')
+                                    stats["http_events"] += 1
+                            except Exception:
+                                pass
+
+                    # ── UDP / DNS ──────────────────────────────────────────
+                    elif isinstance(ip_pkt.data, dpkt.udp.UDP):
+                        udp = ip_pkt.data
+                        if udp.sport == 53 or udp.dport == 53:
+                            try:
+                                dns = dpkt.dns.DNS(udp.data)
+                                if dns.qr == dpkt.dns.DNS_R:
+                                    rcode_map = {
+                                        dpkt.dns.DNS_RCODE_NXDOMAIN: "NXDOMAIN",
+                                        dpkt.dns.DNS_RCODE_SERVFAIL: "SERVFAIL",
+                                        0: "NOERROR",
+                                    }
+                                    rcode = rcode_map.get(dns.rcode, f"RCODE_{dns.rcode}")
+                                    qname = dns.qd[0].name if dns.qd else ""
+                                    out.write(json.dumps({
+                                        "ts": ts, "id.orig_h": dst,
+                                        "id.resp_h": src, "proto": "udp",
+                                        "service": "dns", "rcode_name": rcode,
+                                        "query": qname,
+                                    }) + '\n')
+                                    stats["dns_events"] += 1
+                            except Exception:
+                                pass
+
+                except Exception:
+                    stats["errors"] += 1
+
+    return stats
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
+    """Accept a log/pcap file, run the harness, return a per-request report."""
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
-    
+
     file = request.files['file']
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
-        
+
+    safe_name = secure_filename(file.filename)
+    if not safe_name:
+        return jsonify({'error': 'Invalid filename'}), 400
+
+    if not safe_name.lower().endswith(ALLOWED_EXTENSIONS):
+        return jsonify({'error': f'Unsupported format. Accepted: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+
+    temp_dir = tempfile.mkdtemp()
+    request_id = uuid.uuid4().hex[:12]
+    report_file = os.path.join(temp_dir, f"report_{request_id}.json")
+
     try:
-        temp_dir = tempfile.mkdtemp()
-        file_path = os.path.join(temp_dir, file.filename)
+        file_path = os.path.join(temp_dir, safe_name)
         file.save(file_path)
-        
         process_path = file_path
-        
-        # 1. Seamlessly decompress .gz files on the fly
-        if file.filename.endswith('.gz'):
-            process_path = os.path.join(temp_dir, "uncompressed.log")
-            with gzip.open(file_path, 'rb') as f_in:
-                with open(process_path, 'wb') as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-                    
-        # 2. Run the actual Python Validation Harness on the file!
-        print(f"[*] Analyzing uploaded file: {file.filename} (Format agnostic)")
-        cmd = ['python', 'validation/test_harness.py', '--zeek-log', process_path]
-        
-        result = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True, text=True)
-        
-        report_file = "validation_report.json"
-        if os.path.exists(report_file):
-            with open(report_file, 'r') as f:
-                report_data = f.read()
-            return report_data, 200, {'Content-Type': 'application/json'}
-        else:
-            return jsonify({'error': 'Test harness failed to generate report', 'logs': result.stdout + result.stderr}), 500
-            
+        pcap_stats = None
+
+        # ── Decompress .gz with size guard ─────────────────────────────────
+        if safe_name.lower().endswith('.gz'):
+            process_path = os.path.join(temp_dir, "decompressed.log")
+            max_bytes = MAX_UPLOAD_MB * 1024 * 1024 * 2
+            written = 0
+            with gzip.open(file_path, 'rb') as fin:
+                with open(process_path, 'wb') as fout:
+                    while True:
+                        chunk = fin.read(65536)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > max_bytes:
+                            return jsonify({'error': 'Decompressed file exceeds size limit'}), 400
+                        fout.write(chunk)
+            log.info("Decompressed %s → %d bytes", safe_name, written)
+
+        # ── Native PCAP parsing ────────────────────────────────────────────
+        elif safe_name.lower().endswith('.pcap'):
+            process_path = os.path.join(temp_dir, "extracted_pcap.jsonl")
+            pcap_stats = extract_pcap_to_jsonl(file_path, process_path)
+            log.info("PCAP extraction: %s", pcap_stats)
+            total_events = pcap_stats["tcp_connections"] + pcap_stats["dns_events"] + pcap_stats["http_events"]
+            if total_events == 0:
+                return jsonify({'error': 'No analyzable events found in PCAP', 'stats': pcap_stats}), 400
+
+        # ── Run the detection harness ──────────────────────────────────────
+        log.info("Analyzing: %s (id=%s)", safe_name, request_id)
+        cmd = [sys.executable, 'validation/test_harness.py',
+               '--zeek-log', process_path, '--output', report_file]
+
+        if safe_name.lower().endswith('.pcap'):
+            cmd.extend(['--threshold', '5'])
+
+        result = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True,
+                                text=True, timeout=SUBPROCESS_TIMEOUT)
+
+        if result.returncode != 0 or not os.path.exists(report_file):
+            log.error("Harness failed (rc=%d): %s", result.returncode, result.stderr)
+            return jsonify({'error': 'Analysis engine failed',
+                            'logs': result.stdout + result.stderr}), 500
+
+        with open(report_file, 'r', encoding='utf-8') as f:
+            report = json.load(f)
+
+        if pcap_stats:
+            report['pcap_stats'] = pcap_stats
+
+        # Persist to run history
+        report['request_id'] = request_id
+        history_path = os.path.join(REPORTS_DIR, f"{request_id}.json")
+        try:
+            with open(history_path, 'w', encoding='utf-8') as hf:
+                json.dump(report, hf, indent=2)
+        except OSError:
+            log.warning("Failed to persist report to history")
+
+        return jsonify(report), 200
+
+    except subprocess.TimeoutExpired:
+        log.error("Harness timed out after %ds", SUBPROCESS_TIMEOUT)
+        return jsonify({'error': f'Analysis timed out ({SUBPROCESS_TIMEOUT}s limit)'}), 504
+
     except Exception as e:
+        log.exception("Upload handler error")
         return jsonify({'error': str(e)}), 500
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 @app.route('/mark_intel', methods=['POST'])
 def mark_intel():
-    # Support both JSON and FormData
-    ip = request.form.get('ip') if request.form else request.json.get('ip')
-    classification = request.form.get('classification') if request.form else request.json.get('classification')
-    
+    """Manually tag an IP in the local threat-intel database."""
+    data = request.get_json(silent=True) or {}
+    ip = data.get('ip') or request.form.get('ip', '').strip()
+    classification = data.get('classification') or request.form.get('classification', '').strip()
+
+    # ── Validate IP ────────────────────────────────────────────────────────
+    if not ip:
+        return jsonify({'error': 'Missing ip field'}), 400
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return jsonify({'error': f'Invalid IP address: {ip}'}), 400
+
+    # ── Validate classification ────────────────────────────────────────────
+    if classification not in VALID_CLASSIFICATIONS:
+        return jsonify({'error': f'Invalid classification. Must be one of: {", ".join(sorted(VALID_CLASSIFICATIONS))}'}), 400
+
     intel_file = 'threat_intel.json'
     intel_data = {}
     if os.path.exists(intel_file):
         try:
-            with open(intel_file, 'r') as f:
+            with open(intel_file, 'r', encoding='utf-8') as f:
                 intel_data = json.load(f)
-        except Exception:
-            pass
-            
-    intel_data[ip] = classification
-    with open(intel_file, 'w') as f:
+        except (json.JSONDecodeError, OSError):
+            log.warning("Corrupt threat_intel.json — starting fresh")
+
+    intel_data[ip] = {"classification": classification, "source": "Manual Tag"}
+    with open(intel_file, 'w', encoding='utf-8') as f:
         json.dump(intel_data, f, indent=2)
-        
-    return jsonify({'success': True, 'message': f'IP {ip} added to Threat Intel Database as {classification}'})
+
+    log.info("Tagged %s → %s (manual)", ip, classification)
+    return jsonify({'success': True, 'message': f'{ip} tagged as {classification}'})
+
+
+@app.route('/threat_intel', methods=['GET'])
+def get_threat_intel():
+    """Return the full local threat-intel database for UI browsing."""
+    intel_file = 'threat_intel.json'
+    if not os.path.exists(intel_file):
+        return jsonify({}), 200
+    try:
+        with open(intel_file, 'r', encoding='utf-8') as f:
+            return jsonify(json.load(f)), 200
+    except (json.JSONDecodeError, OSError):
+        return jsonify({}), 200
+
+
+@app.route('/threat_intel/<ip_addr>', methods=['DELETE'])
+def delete_threat_intel(ip_addr):
+    """Remove an IP from the local threat-intel database."""
+    try:
+        ipaddress.ip_address(ip_addr)
+    except ValueError:
+        return jsonify({'error': f'Invalid IP: {ip_addr}'}), 400
+
+    intel_file = 'threat_intel.json'
+    if not os.path.exists(intel_file):
+        return jsonify({'error': 'Not found'}), 404
+
+    with open(intel_file, 'r', encoding='utf-8') as f:
+        intel_data = json.load(f)
+
+    if ip_addr not in intel_data:
+        return jsonify({'error': 'IP not in database'}), 404
+
+    del intel_data[ip_addr]
+    with open(intel_file, 'w', encoding='utf-8') as f:
+        json.dump(intel_data, f, indent=2)
+
+    log.info("Removed %s from threat intel", ip_addr)
+    return jsonify({'success': True, 'message': f'{ip_addr} removed'})
+
+
+@app.route('/reports', methods=['GET'])
+def list_reports():
+    """List all past analysis runs."""
+    runs = []
+    for fname in sorted(os.listdir(REPORTS_DIR), reverse=True):
+        if not fname.endswith('.json'):
+            continue
+        fpath = os.path.join(REPORTS_DIR, fname)
+        try:
+            with open(fpath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            runs.append({
+                'id': fname.replace('.json', ''),
+                'timestamp': data.get('timestamp', ''),
+                'mode': data.get('mode', ''),
+                'alert_count': len(data.get('alerts', [])),
+                'rule_name': data.get('rule_name', ''),
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+    return jsonify(runs), 200
+
+
+@app.route('/reports/<report_id>', methods=['GET'])
+def get_report(report_id):
+    """Retrieve a specific past report by ID."""
+    safe_id = secure_filename(report_id)
+    fpath = os.path.join(REPORTS_DIR, f"{safe_id}.json")
+    if not os.path.exists(fpath):
+        return jsonify({'error': 'Report not found'}), 404
+    with open(fpath, 'r', encoding='utf-8') as f:
+        return jsonify(json.load(f)), 200
+
 
 if __name__ == '__main__':
-    print("[*] Starting OmniLog Validation API Server on port 5000...")
-    app.run(port=5000, debug=False)
+    log.info("OmniLog API starting on port %d", API_PORT)
+    app.run(port=API_PORT, debug=False)

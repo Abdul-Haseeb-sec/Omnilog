@@ -1,101 +1,123 @@
 # Adversary Emulation & Detection Lab
 
-A detection engineering lab that implements a complete **attack → capture → detect → validate** loop. Every detection rule is tested against both attack data and baseline noise, with automated True Positive / False Positive classification.
+A detection engineering tool that implements a complete **attack → capture → detect → validate** loop. Upload raw logs or PCAP captures and get real threat intelligence enrichment — no simulations, no fake data.
 
 ## Architecture
 
 ```
-Attacker VM ──────────► Victim VM
- (Python scripts)        (SSH target)
-        │                     │
-        └───── Zeek Sensor ───┘
-                    │
-            ssh.log (JSON)
-                    │
-         ┌──────────┴──────────┐
-         │  API / Validation  │ ◄─── threat_intel.json (Interactive)
-         └──────────┬─────────┘
-                    │
-              JSON HTTP API
-                    │
-            ┌───────┴───────┐
-            │   Dashboard   │  (React + Vite)
-            └───────────────┘
+  Raw Data Input                    Detection Engine                    Dashboard
+  ─────────────                    ────────────────                    ─────────
+  .pcap (Wireshark)  ──┐
+  .log  (Zeek TSV)   ──┤       ┌──────────────────────┐
+  .json (Zeek/Suricata)┼──────►│  Native PCAP Parser  │
+  .csv  (generic)    ──┤       │  Format Auto-Detect  │        ┌─────────────────┐
+  .gz   (compressed) ──┘       │  Sliding-Window Det.  │──────►│  React Dashboard │
+                               │  Real Threat Intel   │  JSON  │  Detail Modals   │
+                               │  (AbuseIPDB / OTX)   │  API   │  Manual Tagging  │
+                               └──────────┬───────────┘        │  CSV Export      │
+                                          │                    └─────────────────┘
+                                 threat_intel.json
+                                 (persistent tags)
 ```
 
-## Repository Structure
+## What This Actually Does
 
-```
-adversary-emulation-detection-lab/
-├── README.md
-├── lab-setup/              # VM setup guide & network topology
-├── attacks/
-│   └── brute_force_slow/   # Slow SSH brute force emulator
-├── detections/
-│   └── brute_force.yml     # Sigma rules (base + correlation)
-├── api_server.py                  # Flask backend for seamless UI integration
-├── requirements.txt
-├── threat_intel.json              # Auto-generated custom Threat Intel DB
-├── validation/
-│   └── test_harness.py            # O(N) multi-protocol validator with Threat Intel lookups
-└── dashboard/                     # React/Vite premium telemetry viewer
-```
-
-## Current Emulations
-
-| Technique | MITRE ATT&CK | Script | Detection Rule |
-|---|---|---|---|
-| Slow SSH Brute Force | T1110.001 | `attacks/brute_force_slow/slow_ssh_bruteforce.py` | `detections/brute_force.yml` |
+1. **Parses any format natively** — Zeek TSV, JSON Lines, Suricata eve.json, CSV, compressed `.gz`, and raw `.pcap` captures (via `dpkt`). No external dependencies like Zeek required for PCAP analysis.
+2. **Detects anomalies** — Streaming O(N) sliding-window engine catches SSH brute force, DNS anomalies (NXDOMAIN/SERVFAIL), and HTTP errors (4xx/5xx) from any source.
+3. **Real threat intelligence** — Every flagged IP is checked against AbuseIPDB (if configured) or AlienVault OTX (free, no key). Every classification shows its source.
+4. **Two modes**:
+   - **Lab Mode**: Upload logs with a ground-truth file for validated TP/FP scoring.
+   - **Live Mode**: Upload real-world captures and get genuine threat intel lookups.
+5. **Human-in-the-loop** — Tag any IP as malicious or safe from the dashboard. Tags persist in `threat_intel.json` and are used in all future analyses.
 
 ## Quick Start
 
 ### 1. Install Dependencies
 
 ```bash
-# Backend Python Dependencies
+# Backend
 pip install -r requirements.txt
 
-# Frontend React Dependencies
-cd dashboard
-npm install
+# Frontend
+cd dashboard && npm install
 ```
 
-### 2. Launch the Engine & Dashboard
+### 2. Configure (Optional)
 
-**Terminal 1 (Backend API):**
+```bash
+cp .env.example .env
+# Edit .env and add your AbuseIPDB API key for real threat intel
+# Without it, AlienVault OTX is used (free, no key required)
+```
+
+### 3. Launch
+
+**Terminal 1 — Backend API:**
 ```bash
 python api_server.py
 ```
 
-**Terminal 2 (Frontend UI):**
+**Terminal 2 — Dashboard:**
 ```bash
-cd dashboard
-npm run dev
+cd dashboard && npm run dev
 ```
 
-### 3. Hunt Threats Seamlessly
+### 4. Analyze
 
-1. Open `http://localhost:5175` in your browser.
-2. Click **Upload Data (.log/.csv/.gz)** and select any raw Zeek log, CSV, or compressed archive (e.g., `dns.log.gz`).
-3. The backend will natively unzip and parse the data, evaluate detection rules, and run a **Simulated Threat Intelligence API lookup** against every suspicious IP.
-4. Interact with the **Threat Intel Database** directly from the UI by clicking `[TAG BAD]` or `[TAG SAFE]`. This immediately saves to your local `threat_intel.json` and automatically classifies that IP in all future uploads!
+1. Open `http://localhost:5173`
+2. Click **Upload Data** and select a `.pcap`, `.log`, `.csv`, `.json`, or `.gz` file
+3. Review alerts — click any row to see the full detail breakdown
+4. Tag unknown IPs as malicious or safe — your tags persist across sessions
 
-## Dashboard Features
+## PCAP Analysis
 
-- **Format-Agnostic Uploads** — Upload `.log`, `.csv`, `.tsv`, or `.gz` files directly. No preprocessing required.
-- **Interactive Threat Intelligence** — Manually label unknown IP addresses directly from the UI to build your own local Threat Intel Database.
-- **Dynamic Stats** — Real-time TP/FP counts with color-coded severity indicators.
-- **Raw Log Inspector** — Click any alert row to view the underlying Zeek JSON/TSV data.
-- **CSV Export** — One-click export of all alerts for external analysis.
+Upload `.pcap` files directly from Wireshark or any packet capture tool. The native parser extracts:
 
-## Validation Harness
+| Protocol | What's Detected | How |
+|---|---|---|
+| TCP/SSH | Brute force attempts | SYN packets to port 22 |
+| DNS | Domain anomalies | NXDOMAIN / SERVFAIL response codes |
+| HTTP | Web scanning | 4xx/5xx response status codes |
 
-The harness (`validation/test_harness.py`) uses:
+> **Note:** PCAP analysis is heuristic — SSH auth success/failure cannot be determined from encrypted packets. The engine counts connection attempts (SYN packets) to port 22 as potential auth failures.
 
-- **Streaming generator** for log parsing (no OOM on large files)
-- **Deque-based sliding window** for O(N) threshold evaluation
-- **IP + time-window correlation** against ground truth for TP/FP classification
-- **Structured JSON output** consumed directly by the dashboard
+## Repository Structure
+
+```
+├── api_server.py              # Flask API — upload, PCAP parsing, orchestration
+├── requirements.txt           # Python dependencies
+├── .env.example               # Configuration template
+├── validation/
+│   └── test_harness.py        # Detection engine + threat intel enrichment
+├── dashboard/                 # React/Vite frontend
+│   └── src/
+│       ├── App.tsx            # Dashboard UI
+│       └── index.css          # Design system
+├── attacks/
+│   └── brute_force_slow/      # SSH brute force emulator + notes
+├── detections/
+│   └── brute_force.yml        # Sigma detection rules
+└── lab-setup/
+    └── README.md              # VM topology guide
+```
+
+## Security
+
+This tool is designed for **localhost use only**. It does not include authentication.
+
+- CORS is locked to `localhost:5173` by default
+- File uploads are sanitized (`secure_filename`) and size-capped
+- IP inputs are validated before storage
+- Temp files are cleaned up after every request
+- Do **not** expose this on a network without adding authentication first
+
+## Current Detections
+
+| Technique | MITRE ATT&CK | Detection Rule |
+|---|---|---|
+| Slow SSH Brute Force | T1110.001 | `detections/brute_force.yml` |
+| DNS Anomalies | T1071.004 | Built-in (NXDOMAIN/SERVFAIL) |
+| HTTP Scanning | T1190 | Built-in (4xx/5xx status codes) |
 
 ## License
 
