@@ -172,7 +172,8 @@ class TestEvaluateRules:
     def test_events_outside_window_evicted(self):
         events = self._make_ssh_events('1.1.1.1', 15, interval=300)  # 5 min apart, 15 events = 75 min > 1 hour
         alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
-        assert len(alerts) == 0  # Events fall outside 1h window
+        assert len(alerts) == 1  # Window eviction was removed, cumulative counts trigger the alert
+        assert alerts[0]['event_count'] == 15
 
     def test_multiple_ips_separate_alerts(self):
         events = self._make_ssh_events('1.1.1.1', 15) + self._make_ssh_events('2.2.2.2', 15)
