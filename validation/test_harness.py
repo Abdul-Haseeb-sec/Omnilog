@@ -178,6 +178,10 @@ def _normalize_suricata(rec):
 
 # ── Master Parser (format auto-detection) ──────────────────────────────────────
 
+ZEEK_SSH_FIELDS = ["ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p", "version", "auth_success", "auth_attempts", "direction", "client", "server", "cipher_alg", "mac_alg", "compression_alg", "kex_alg", "host_key_alg", "host_key"]
+ZEEK_DNS_FIELDS = ["ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p", "proto", "trans_id", "query", "qclass", "qclass_name", "qtype", "qtype_name", "rcode", "rcode_name", "AA", "TC", "RD", "RA", "Z", "answers", "TTLs", "rejected"]
+ZEEK_HTTP_FIELDS = ["ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p", "trans_depth", "method", "host", "uri", "referrer", "version", "user_agent", "request_body_len", "response_body_len", "status_code", "status_msg", "info_code", "info_msg", "tags", "username", "password", "proxied", "orig_fuids", "orig_filenames", "orig_mime_types", "resp_fuids", "resp_filenames", "resp_mime_types"]
+
 def parse_log(log_path):
     """Auto-detect format and yield normalized records."""
     try:
@@ -200,6 +204,7 @@ def parse_log(log_path):
                 log.info("Detected format: Zeek TSV")
                 reader = csv.reader(f, delimiter='\t')
                 fields = []
+                warned_unrecognized = False
                 for row in reader:
                     if not row:
                         continue
@@ -208,8 +213,23 @@ def parse_log(log_path):
                     elif not row[0].startswith('#'):
                         if fields:
                             yield dict(zip(fields, row))
-                        elif len(row) > 2:
-                            yield {'ts': row[0], 'id.orig_h': row[2]}
+                        else:
+                            rl = len(row)
+                            fname = os.path.basename(log_path).lower() if log_path else ""
+                            schema = None
+                            
+                            if "ssh" in fname and rl == 18: schema = ZEEK_SSH_FIELDS
+                            elif "dns" in fname and rl == 23: schema = ZEEK_DNS_FIELDS
+                            elif "http" in fname and rl == 27: schema = ZEEK_HTTP_FIELDS
+                            elif rl == 18: schema = ZEEK_SSH_FIELDS
+                            elif rl == 23: schema = ZEEK_DNS_FIELDS
+                            elif rl == 27: schema = ZEEK_HTTP_FIELDS
+                            
+                            if schema:
+                                yield dict(zip(schema, row))
+                            elif not warned_unrecognized:
+                                log.warning(f"Headerless Zeek log with unrecognized column count ({rl}) — cannot map fields reliably. Supported: ssh.log (18 cols), dns.log (23 cols), http.log (27 cols). Consider exporting with a #fields header or enabling json-logs.zeek.")
+                                warned_unrecognized = True
 
             # ── Syslog / auth.log ──────────────────────────────────
             elif SYSLOG_TS.match(first_line):
