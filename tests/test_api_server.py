@@ -40,6 +40,31 @@ def clean_intel():
         os.unlink(INTEL_FILE)
 
 
+# ── Auth Validation ────────────────────────────────────────────────────────────
+
+class TestAuth:
+    def test_unauthorized_missing_key(self, client, monkeypatch):
+        monkeypatch.setattr('api_server.API_KEY', 'secret-key')
+        res = client.get('/threat_intel')
+        assert res.status_code == 401
+        assert b'Unauthorized' in res.data
+        
+    def test_unauthorized_invalid_key(self, client, monkeypatch):
+        monkeypatch.setattr('api_server.API_KEY', 'secret-key')
+        res = client.get('/threat_intel', headers={'X-API-Key': 'wrong-key'})
+        assert res.status_code == 401
+        assert b'Unauthorized' in res.data
+        
+    def test_authorized_valid_key(self, client, monkeypatch):
+        monkeypatch.setattr('api_server.API_KEY', 'secret-key')
+        res = client.get('/threat_intel', headers={'X-API-Key': 'secret-key'})
+        assert res.status_code == 200
+
+    def test_no_auth_required_if_not_set(self, client, monkeypatch):
+        monkeypatch.setattr('api_server.API_KEY', None)
+        res = client.get('/threat_intel')
+        assert res.status_code == 200
+
 # ── Upload Validation ──────────────────────────────────────────────────────────
 
 class TestUpload:

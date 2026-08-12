@@ -33,6 +33,7 @@ ALLOWED_ORIGINS = [
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 API_PORT = int(os.getenv("API_PORT", "5000"))
 SUBPROCESS_TIMEOUT = int(os.getenv("SUBPROCESS_TIMEOUT", "120"))
+API_KEY = os.getenv("API_KEY")
 
 ALLOWED_EXTENSIONS = ('.log', '.csv', '.tsv', '.json', '.jsonl', '.gz', '.txt', '.pcap', '.pcapng', '.cap', '.xml')
 VALID_CLASSIFICATIONS = frozenset({"TRUE POSITIVE", "FALSE POSITIVE"})
@@ -49,12 +50,27 @@ logging.basicConfig(
 log = logging.getLogger("omnilog")
 
 # ── Flask App ──────────────────────────────────────────────────────────────────
-# WARNING: This server has NO authentication. It is designed for localhost use
-# only. Do NOT expose port 5000 on a network without adding auth first.
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
 CORS(app, origins=ALLOWED_ORIGINS)
 os.makedirs(REPORTS_DIR, exist_ok=True)
+
+if not API_KEY:
+    log.warning("running without auth — do not expose this port. Set API_KEY to enable authentication.")
+
+@app.before_request
+def require_api_key():
+    if request.method == 'OPTIONS':
+        return  # Allow CORS preflight
+        
+    # Only protect these specific routes
+    protected_routes = ['/upload', '/mark_intel', '/threat_intel']
+    is_protected = any(request.path == route or request.path.startswith(f"{route}/") for route in protected_routes)
+    
+    if is_protected and API_KEY:
+        provided_key = request.headers.get('X-API-Key')
+        if not provided_key or provided_key != API_KEY:
+            return jsonify({'error': 'Unauthorized: Invalid or missing API key'}), 401
 
 
 # ── PCAP Linktype Constants ────────────────────────────────────────────────────
