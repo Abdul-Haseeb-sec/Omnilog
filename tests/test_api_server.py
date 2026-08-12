@@ -65,6 +65,16 @@ class TestAuth:
         res = client.get('/threat_intel')
         assert res.status_code == 200
 
+    def test_unauthorized_reports(self, client, monkeypatch):
+        monkeypatch.setattr('api_server.API_KEY', 'secret-key')
+        res = client.get('/reports')
+        assert res.status_code == 401
+        
+    def test_unauthorized_report_id(self, client, monkeypatch):
+        monkeypatch.setattr('api_server.API_KEY', 'secret-key')
+        res = client.get('/reports/12345')
+        assert res.status_code == 401
+
 # ── Upload Validation ──────────────────────────────────────────────────────────
 
 class TestUpload:

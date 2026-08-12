@@ -64,7 +64,7 @@ def require_api_key():
         return  # Allow CORS preflight
         
     # Only protect these specific routes
-    protected_routes = ['/upload', '/mark_intel', '/threat_intel']
+    protected_routes = ['/upload', '/mark_intel', '/threat_intel', '/reports']
     is_protected = any(request.path == route or request.path.startswith(f"{route}/") for route in protected_routes)
     
     if is_protected and API_KEY:
