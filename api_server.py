@@ -23,12 +23,6 @@ from dotenv import load_dotenv
 import dpkt
 import re
 
-# --- Heuristic Patterns ---
-RE_KERB = re.compile(b'\x1b([\x01-\x1f])([a-zA-Z0-9_.-]{3,20})')
-RE_SMB = re.compile(b'([A-Z]\x00(?:[a-z]\x00)+ \x00[A-Z]\x00(?:[a-z]\x00)+)')
-BLACKLIST_SMB = {'System Access', 'Kerberos Policy', 'Registry Values', 'Microsoft Enhanced', 'Cryptographic Provider'}
-BLACKLIST_KERB = {'krbtgt', 'cifs', 'ldap', 'host'}
-
 # ── Configuration ──────────────────────────────────────────────────────────────
 load_dotenv()
 
@@ -135,14 +129,6 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
 
                     if not isinstance(ip_pkt, dpkt.ip.IP):
                         continue
-                        
-                    src_ip = socket.inet_ntoa(ip_pkt.src)
-                    
-                    if src_mac:
-                        out.write(json.dumps({
-                            "ts": ts, "intel_type": "host_profile",
-                            "ip": src_ip, "mac": src_mac
-                        }) + '\n')
 
                     # ── TCP ────────────────────────────────────────────────
                     if isinstance(ip_pkt.data, dpkt.tcp.TCP):
@@ -177,30 +163,6 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                     stats["http_events"] += 1
                             except Exception:
                                 pass
-                                
-                        elif tcp.sport in (88, 445) or tcp.dport in (88, 445):
-                            payload = tcp.data
-                            if payload:
-                                if tcp.sport == 88 or tcp.dport == 88:
-                                    for match in RE_KERB.finditer(payload):
-                                        length = match.group(1)[0]
-                                        string = match.group(2)
-                                        if length == len(string):
-                                            decoded = string.decode('utf-8', errors='ignore')
-                                            if decoded.lower() not in BLACKLIST_KERB and '.' not in decoded:
-                                                out.write(json.dumps({
-                                                    "ts": ts, "intel_type": "host_profile",
-                                                    "ip": src_ip, "windows_user": decoded
-                                                }) + '\n')
-                                                
-                                if tcp.sport == 445 or tcp.dport == 445:
-                                    for match in RE_SMB.finditer(payload):
-                                        decoded = match.group(1).decode('utf-16le', errors='ignore')
-                                        if decoded not in BLACKLIST_SMB:
-                                            out.write(json.dumps({
-                                                "ts": ts, "intel_type": "host_profile",
-                                                "ip": src_ip, "full_name": decoded
-                                            }) + '\n')
 
                     # ── UDP / DNS ──────────────────────────────────────────
                     elif isinstance(ip_pkt.data, dpkt.udp.UDP):
@@ -227,33 +189,6 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                     stats["dns_events"] += 1
                             except Exception:
                                 pass
-                                
-                        elif udp.sport in (67, 68) or udp.dport in (67, 68):
-                            try:
-                                dhcp = dpkt.dhcp.DHCP(udp.data)
-                                for opt in dhcp.opts:
-                                    if opt[0] == 12: # Hostname
-                                        hostname = opt[1].decode('utf-8')
-                                        out.write(json.dumps({
-                                            "ts": ts, "intel_type": "host_profile",
-                                            "ip": src_ip, "mac": src_mac, "hostname": hostname
-                                        }) + '\n')
-                            except Exception:
-                                pass
-                                
-                        elif udp.sport == 88 or udp.dport == 88:
-                            payload = udp.data
-                            if payload:
-                                for match in RE_KERB.finditer(payload):
-                                    length = match.group(1)[0]
-                                    string = match.group(2)
-                                    if length == len(string):
-                                        decoded = string.decode('utf-8', errors='ignore')
-                                        if decoded.lower() not in BLACKLIST_KERB and '.' not in decoded:
-                                            out.write(json.dumps({
-                                                "ts": ts, "intel_type": "host_profile",
-                                                "ip": src_ip, "windows_user": decoded
-                                            }) + '\n')
 
                 except Exception:
                     stats["errors"] += 1

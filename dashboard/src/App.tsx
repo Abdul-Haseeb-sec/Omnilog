@@ -442,7 +442,7 @@ function App() {
 
       {/* ── Content Grid ─────────────────────────────────────── */}
       <div className="content-grid">
-        <div className="panel" style={{ overflow: 'hidden' }}>
+        <div className="panel">
           <div className="panel-title flex-between">
             <span className="flex-center gap-sm">
               <ShieldAlert size={16} /> Validated Alerts
