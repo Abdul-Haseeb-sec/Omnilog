@@ -25,10 +25,6 @@ description: |
   eviction) to prevent slow attacks from evading detection by straddling a
   window boundary. This is a deliberate design choice for analyzing bounded,
   already-collected log files.
-
-  NOTE: This Sigma file documents the intended detection rule. The current
-  engine implements it as a fixed Python heuristic in test_harness.py, not
-  as a pySigma-driven evaluator. Sigma integration is on the roadmap.
 author: Detection Engineering Team
 date: 2026-08-12
 correlation:
