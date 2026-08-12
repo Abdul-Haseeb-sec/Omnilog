@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+# Hugging Face runs containers as a non-root user (user ID 1000)
+# We must create this user and give them permissions
+RUN useradd -m -u 1000 user
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
+
+WORKDIR /app
+
+# Copy requirements and install
+COPY --chown=user requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all application files
+COPY --chown=user . .
+
+# Ensure the script is executable
+RUN chmod +x run_prod.sh
+
+# Create persistent storage files/directories
+RUN touch threat_intel.json && mkdir -p reports
+
+# Hugging Face REQUIRES apps to run on port 7860
+EXPOSE 7860
+ENV PORT=7860
+ENV API_PORT=7860
+
+# Run the production script using Gunicorn
+CMD ["./run_prod.sh"]
