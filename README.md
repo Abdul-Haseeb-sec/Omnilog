@@ -22,9 +22,13 @@ A detection engineering tool that implements a complete **attack → capture →
 
 ## What This Actually Does
 
-1. **Parses any format natively** — Zeek TSV, JSON Lines, Suricata eve.json, CSV, compressed `.gz`, and raw `.pcap` captures (via `dpkt`). No external dependencies like Zeek required for PCAP analysis.
-2. **Detects anomalies** — Streaming O(N) cumulative tracking engine catches SSH brute force, DNS anomalies (NXDOMAIN/SERVFAIL), and HTTP errors (4xx/5xx) without eviction bottlenecks.
-3. **Multi-Signal Triage** — Uses mathematical heuristics (Shannon Entropy, Domain Diversity, and Timing Variance) to strictly auto-classify True Positives (DGAs/Beacons) and False Positives (misconfigured apps). Uncertain edge cases are deferred to a human review queue.
+1. **Parses any format natively** — Zeek TSV, JSON Lines, Suricata eve.json, CSV, compressed `.gz`, and raw `.pcap`/`.pcapng`/`.cap` captures (via `dpkt`). Supports Ethernet, Linux cooked capture (SLL), and raw IP linktypes. No external dependencies like Zeek required for PCAP analysis.
+2. **Detects anomalies** — Streaming O(N) cumulative detection engine catches SSH brute force, DNS anomalies (NXDOMAIN/SERVFAIL), and HTTP errors (4xx/5xx). Counts are tracked cumulatively across the entire dataset to prevent slow attacks from evading detection by straddling a time-window boundary.
+3. **Multi-Signal Triage** — Uses mathematical heuristics to auto-classify alerts:
+   - **DNS**: Shannon Entropy, Domain Diversity, Timing Variance → DGA/Beacon detection vs. misconfigured apps.
+   - **SSH**: Username Diversity, Timing Cadence → Credential spray/scripted attack detection.
+   - **HTTP**: URI Diversity, Request Rate → Path scanning detection vs. app retry logic.
+   - Uncertain edge cases are always deferred to human review — no false certainty.
 4. **Real threat intelligence** — Every flagged IP is checked against AbuseIPDB (if configured) or AlienVault OTX (free, no key). Every classification shows its source.
 5. **Human-in-the-loop** — Tag any IP as malicious or safe from the dashboard. Tags persist in `threat_intel.json` and are used in all future analyses.
 
@@ -63,14 +67,14 @@ cd dashboard && npm run dev
 ### 4. Analyze
 
 1. Open `http://localhost:5173`
-2. Click **Upload Data** and select a `.pcap`, `.log`, `.csv`, `.json`, or `.gz` file
+2. Click **Upload Data** and select a `.pcap`, `.pcapng`, `.cap`, `.log`, `.csv`, `.json`, or `.gz` file
 3. **Interactive Filtering:** Click the stat cards (True Positives, False Positives, Needs Review) to instantly filter the dashboard view.
 4. Review alerts — click any row to see the full detail breakdown, timeline, and intel.
 5. Tag unknown IPs as malicious or safe — your tags persist across sessions.
 
 ## PCAP Analysis
 
-Upload `.pcap` files directly from Wireshark or any packet capture tool. The native parser extracts:
+Upload `.pcap`, `.pcapng`, or `.cap` files directly from Wireshark, tcpdump, or any packet capture tool. The native parser extracts:
 
 | Protocol | What's Detected | How |
 |---|---|---|
@@ -78,7 +82,9 @@ Upload `.pcap` files directly from Wireshark or any packet capture tool. The nat
 | DNS | Domain anomalies | NXDOMAIN / SERVFAIL response codes |
 | HTTP | Web scanning | 4xx/5xx response status codes |
 
-> **Note:** PCAP analysis is heuristic — SSH auth success/failure cannot be determined from encrypted packets. The engine counts connection attempts (SYN packets) to port 22 as potential auth failures.
+> **Note:** PCAP analysis is heuristic — SSH auth success/failure cannot be determined from encrypted packets. The engine counts connection attempts (SYN packets) to port 22 as potential auth failures. The dashboard displays a "⚠ PCAP heuristic" warning on these alerts.
+
+> **Supported linktypes:** Ethernet (`DLT_EN10MB`, e.g. `tcpdump -i eth0`), Linux cooked capture (`DLT_LINUX_SLL`, e.g. `tcpdump -i any`), and Raw IP (`DLT_RAW`). IPv6 packets are not currently parsed — only IPv4.
 
 ## Repository Structure
 
@@ -117,6 +123,8 @@ This tool is designed for **localhost use only**. It does not include authentica
 | Slow SSH Brute Force | T1110.001 | `detections/brute_force.yml` |
 | DNS Anomalies | T1071.004 | Built-in (NXDOMAIN/SERVFAIL) |
 | HTTP Scanning | T1190 | Built-in (4xx/5xx status codes) |
+
+> **Sigma integration note:** `detections/brute_force.yml` documents the intended rule parameters. The current engine implements detection as a fixed Python heuristic — Sigma-driven evaluation (via pySigma) is on the roadmap.
 
 ## License
 

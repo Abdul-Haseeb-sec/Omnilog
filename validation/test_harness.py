@@ -37,7 +37,9 @@ logging.basicConfig(
 log = logging.getLogger("harness")
 
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_API_KEY", "").strip()
-INTEL_CACHE_FILE = "intel_cache.json"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else os.getcwd()
+HARNESS_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == 'validation' else SCRIPT_DIR
+INTEL_CACHE_FILE = os.path.join(HARNESS_DIR, "intel_cache.json")
 CACHE_TTL_HOURS = 24
 
 # ── Syslog regex patterns ─────────────────────────────────────────────────────
@@ -275,6 +277,9 @@ def parse_log(log_path):
                 f.seek(0)
                 full_parsed = False
                 try:
+                    # Note: json.load() reads the entire file into memory.
+                    # For files near the MAX_UPLOAD_MB limit, this can use significant RAM.
+                    # Acceptable for typical upload sizes; for truly large arrays, use ijson.
                     full_json = json.load(f)
                     if isinstance(full_json, list):
                         log.info("Successfully loaded as a JSON array")
@@ -316,13 +321,37 @@ def parse_log(log_path):
         log.error("Log file not found: %s", log_path)
 
 
-# ── Sliding-Window Detection Engine ────────────────────────────────────────────
+# ── Cumulative Anomaly Detection Engine ────────────────────────────────────────
+
+
+def _compute_timing_stddev(ts_list):
+    """Compute standard deviation of inter-arrival gaps from a list of timestamps."""
+    if len(ts_list) < 2:
+        return None
+    gaps = [ts_list[i] - ts_list[i-1] for i in range(1, len(ts_list))]
+    mean_gap = sum(gaps) / len(gaps)
+    variance = sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)
+    return math.sqrt(variance)
+
+
+def _shannon_entropy(s):
+    """Compute Shannon entropy of a string."""
+    if not s:
+        return 0
+    counts = collections.Counter(s)
+    length = len(s)
+    return -sum((c / length) * math.log2(c / length) for c in counts.values())
+
 
 def evaluate_rules(records, threshold=5, window_hours=1):
     """
-    O(N) streaming anomaly detection.
-    Updated to track cumulative counts across the entire dataset to prevent
-    undercounting, truncated timestamps, or missing hosts (fixes Bugs 1-3).
+    O(N) streaming cumulative anomaly detection.
+
+    Counts are tracked cumulatively across the entire dataset (no time-window
+    eviction). This is a deliberate design choice for analyzing bounded,
+    already-collected files: it prevents slow attacks from evading detection
+    by straddling a window boundary. The window_hours parameter is accepted
+    for API compatibility but is not currently used for eviction.
     """
     alerts = []
     windows = {}
@@ -333,19 +362,34 @@ def evaluate_rules(records, threshold=5, window_hours=1):
     first_dest = {}
     
     unique_domains = collections.defaultdict(set)
-    arrival_times = collections.defaultdict(list)
+    unique_usernames = collections.defaultdict(set)
+    unique_uris = collections.defaultdict(set)
+    dns_arrival_times = collections.defaultdict(list)
+    ssh_arrival_times = collections.defaultdict(list)
+    http_arrival_times = collections.defaultdict(list)
     mac_to_hostname = {}
     ip_to_mac = {}
+    mac_to_windows_user = {}
+    mac_to_full_name = {}
 
     for record in records:
         if record.get('intel_type') == 'host_profile':
             ip = record.get('ip')
             mac = record.get('mac')
             hostname = record.get('hostname')
+            w_user = record.get('windows_user')
+            f_name = record.get('full_name')
+            
             if mac and hostname:
                 mac_to_hostname[mac] = hostname
             if ip and mac and ip != '0.0.0.0':
                 ip_to_mac[ip] = mac
+            if ip and w_user and ip != '0.0.0.0':
+                if ip in ip_to_mac:
+                    mac_to_windows_user[ip_to_mac[ip]] = w_user
+            if ip and f_name and ip != '0.0.0.0':
+                if ip in ip_to_mac:
+                    mac_to_full_name[ip_to_mac[ip]] = f_name
             continue
         is_error = False
         detection_type = None
@@ -400,10 +444,22 @@ def evaluate_rules(records, threshold=5, window_hours=1):
             query = record.get('query')
             if query and len(unique_domains[orig_h]) < 10000:
                 unique_domains[orig_h].add(query)
-            if len(arrival_times[orig_h]) < 10000:
-                arrival_times[orig_h].append(float(ts_val))
+            if len(dns_arrival_times[orig_h]) < 10000:
+                dns_arrival_times[orig_h].append(float(ts_val))
+        elif detection_type == 'ssh_brute_force':
+            username = record.get('username')
+            if username and len(unique_usernames[orig_h]) < 10000:
+                unique_usernames[orig_h].add(username)
+            if len(ssh_arrival_times[orig_h]) < 10000:
+                ssh_arrival_times[orig_h].append(float(ts_val))
+        elif detection_type == 'http_error':
+            uri = record.get('uri') or record.get('query', '')
+            if uri and len(unique_uris[orig_h]) < 10000:
+                unique_uris[orig_h].add(uri)
+            if len(http_arrival_times[orig_h]) < 10000:
+                http_arrival_times[orig_h].append(float(ts_val))
 
-        # No eviction logic. We track all-time cumulative counts.
+        # Cumulative counting — no eviction. See docstring for rationale.
         current_count = sum(type_counts[orig_h].values())
 
         if current_count >= threshold:
@@ -445,30 +501,41 @@ def evaluate_rules(records, threshold=5, window_hours=1):
             alert['dynamic_context'] = {'MAC Address': mac}
             if mac in mac_to_hostname:
                 alert['dynamic_context']['Host Name'] = mac_to_hostname[mac]
+            if mac in mac_to_windows_user:
+                alert['dynamic_context']['Windows User'] = mac_to_windows_user[mac]
+            if mac in mac_to_full_name:
+                alert['dynamic_context']['Full Name'] = mac_to_full_name[mac]
         
-        # Calculate Advanced DNS Metrics
+        # ── Compute detection-type-specific metrics ──────────────────────
         if alert['detection_type'] == 'dns_anomaly' and orig_h in unique_domains:
             domains = unique_domains[orig_h]
             diversity = len(domains)
-            
-            def shannon_entropy(s):
-                if not s: return 0
-                counts = collections.Counter(s)
-                return -sum((c/len(s)) * math.log2(c/len(s)) for c in counts.values())
-                
-            avg_entropy = sum(shannon_entropy(d) for d in domains) / diversity if diversity else 0
-            
-            ts_list = arrival_times[orig_h]
-            stddev = None
-            if len(ts_list) > 1:
-                gaps = [ts_list[i] - ts_list[i-1] for i in range(1, len(ts_list))]
-                mean_gap = sum(gaps) / len(gaps)
-                variance = sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)
-                stddev = math.sqrt(variance)
-                
+            avg_entropy = sum(_shannon_entropy(d) for d in domains) / diversity if diversity else 0
+            stddev = _compute_timing_stddev(dns_arrival_times[orig_h])
+
             alert['metrics'] = {
                 'diversity': diversity,
                 'avg_entropy': round(avg_entropy, 2),
+                'timing_stddev': round(stddev, 2) if stddev is not None else None
+            }
+
+        elif alert['detection_type'] == 'ssh_brute_force':
+            usernames = unique_usernames.get(orig_h, set())
+            username_diversity = len(usernames)
+            stddev = _compute_timing_stddev(ssh_arrival_times.get(orig_h, []))
+
+            alert['metrics'] = {
+                'username_diversity': username_diversity,
+                'timing_stddev': round(stddev, 2) if stddev is not None else None
+            }
+
+        elif alert['detection_type'] == 'http_error':
+            uris = unique_uris.get(orig_h, set())
+            uri_diversity = len(uris)
+            stddev = _compute_timing_stddev(http_arrival_times.get(orig_h, []))
+
+            alert['metrics'] = {
+                'uri_diversity': uri_diversity,
                 'timing_stddev': round(stddev, 2) if stddev is not None else None
             }
 
@@ -496,9 +563,21 @@ def _load_json(path):
 
 
 def _save_json(path, data):
+    """Write JSON atomically via temp file + os.replace to prevent corruption."""
+    dir_name = os.path.dirname(path) or '.'
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
+        import tempfile as _tmpmod
+        fd, tmp_path = _tmpmod.mkstemp(dir=dir_name, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except OSError:
         log.warning("Failed to write %s", path)
 
@@ -555,15 +634,21 @@ def _check_otx(ip):
 
 def enrich_ip(ip, alert_data, local_intel, cache):
     """Multi-source enrichment: Manual Tag → Cache → AbuseIPDB → OTX → Heuristic."""
+    base_details = {}
+    if alert_data.get('dynamic_context'):
+        base_details.update(alert_data['dynamic_context'])
+
     if ip in local_intel:
         entry = local_intel[ip]
         cls = entry.get('classification', entry) if isinstance(entry, dict) else entry
-        return cls, 'Manual Tag', {}
+        return cls, 'Manual Tag', base_details
 
     if ip in cache:
         cached = cache[ip]
         if time.time() - cached.get('cached_at', 0) < CACHE_TTL_HOURS * 3600:
-            return cached['classification'], cached['source'] + ' (cached)', cached.get('details', {})
+            details = cached.get('details', {})
+            details.update(base_details)
+            return cached['classification'], cached['source'] + ' (cached)', details
 
     try:
         ip_obj = ipaddress.ip_address(ip)
@@ -589,10 +674,45 @@ def enrich_ip(ip, alert_data, local_intel, cache):
                 if stddev is not None and stddev < 2.0 and event_count >= 5:
                     return 'TRUE POSITIVE', 'Automated Triage (Rigid Timing)', {'reason': f'Rigid beaconing (stddev {stddev}s)'}
 
+            elif alert_data.get('detection_type') == 'ssh_brute_force' and metrics:
+                username_diversity = metrics.get('username_diversity', 0)
+                stddev = metrics.get('timing_stddev')
+
+                # Many distinct usernames = credential spray/stuffing → lean TP
+                if username_diversity > 5 and event_count >= 10:
+                    return 'TRUE POSITIVE', 'Automated Triage (Credential Spray)', {
+                        'reason': f'{username_diversity} distinct usernames tried from one source — credential spray pattern'
+                    }
+
+                # Low-variance timing across many attempts = scripted attack
+                # (e.g. slow_ssh_bruteforce.py with 30-60s jitter produces characteristic stddev)
+                if stddev is not None and stddev < 5.0 and event_count >= 15:
+                    return 'TRUE POSITIVE', 'Automated Triage (Scripted Attack)', {
+                        'reason': f'Rigid timing cadence (stddev {stddev}s) across {event_count} attempts — scripted behavior'
+                    }
+
+                # Single username retried many times could be a legit user with a stale password.
+                # Don't auto-FP — lockout scenarios are security-relevant. Leave as UNKNOWN.
+
+            elif alert_data.get('detection_type') == 'http_error' and metrics:
+                uri_diversity = metrics.get('uri_diversity', 0)
+                stddev = metrics.get('timing_stddev')
+
+                # Many distinct URIs hit in burst = directory/path scanning → lean TP
+                if uri_diversity > 20 and event_count >= 30:
+                    return 'TRUE POSITIVE', 'Automated Triage (Path Scanning)', {
+                        'reason': f'{uri_diversity} distinct URIs probed — directory/path scanning pattern'
+                    }
+
+                # Same endpoint hit repeatedly with low diversity could be app retry logic
+                if uri_diversity < 3 and event_count > 50:
+                    return 'FALSE POSITIVE', 'Automated Triage (App Retry)', {
+                        'reason': f'Low URI diversity ({uri_diversity}) despite {event_count} errors — likely application retry logic'
+                    }
+
             # Dynamic Host Profile Context
             lab_details = {'reason': 'Internal network, manual triage required'}
-            if alert_data.get('dynamic_context'):
-                lab_details.update(alert_data['dynamic_context'])
+            lab_details.update(base_details)
 
             # All other unverified internal traffic requires human triage.
             return 'UNKNOWN', 'Unverified (Private IP)', lab_details
@@ -682,7 +802,7 @@ def main():
             if times:
                 gt_start, gt_end = min(times), max(times)
 
-        local_intel = _load_json('threat_intel.json')
+        local_intel = _load_json(os.path.join(HARNESS_DIR, 'threat_intel.json'))
         cache = _load_json(INTEL_CACHE_FILE)
 
         if not gt_records:

@@ -144,7 +144,7 @@ class TestParseLog:
         assert records[0]['id.orig_h'] == '10.0.0.1'
 
 
-# ── Sliding Window Tests ──────────────────────────────────────────────────────
+# ── Cumulative Detection Tests ────────────────────────────────────────────────
 
 class TestEvaluateRules:
     def _make_ssh_events(self, ip: str, count: int, start_ts: float = 1000.0, interval: float = 10.0):
@@ -169,10 +169,11 @@ class TestEvaluateRules:
         assert len(alerts) == 1
         assert alerts[0]['event_count'] == 50
 
-    def test_events_outside_window_evicted(self):
+    def test_cumulative_counting_no_eviction(self):
+        """Cumulative counting: events spanning >1h still trigger because there is no window eviction."""
         events = self._make_ssh_events('1.1.1.1', 15, interval=300)  # 5 min apart, 15 events = 75 min > 1 hour
         alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
-        assert len(alerts) == 1  # Window eviction was removed, cumulative counts trigger the alert
+        assert len(alerts) == 1  # Cumulative counts trigger the alert regardless of time span
         assert alerts[0]['event_count'] == 15
 
     def test_multiple_ips_separate_alerts(self):
@@ -211,6 +212,31 @@ class TestEvaluateRules:
         assert len(alerts) == 1
         assert alerts[0]['detection_confidence'] == 'Parsed Log'
 
+    def test_ssh_metrics_computed(self):
+        """SSH brute force alerts should have username_diversity and timing_stddev metrics."""
+        events = [
+            {'ts': str(1000 + i * 10), 'id.orig_h': '7.7.7.7', 'auth_success': False,
+             'username': f'user{i}'}
+            for i in range(15)
+        ]
+        alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
+        assert len(alerts) == 1
+        assert 'metrics' in alerts[0]
+        assert alerts[0]['metrics']['username_diversity'] == 15
+        assert alerts[0]['metrics']['timing_stddev'] is not None
+
+    def test_http_metrics_computed(self):
+        """HTTP error alerts should have uri_diversity and timing_stddev metrics."""
+        events = [
+            {'ts': str(1000 + i), 'id.orig_h': '8.8.8.8', 'status_code': '404',
+             'uri': f'/path/{i}'}
+            for i in range(15)
+        ]
+        alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
+        assert len(alerts) == 1
+        assert 'metrics' in alerts[0]
+        assert alerts[0]['metrics']['uri_diversity'] == 15
+
 
 # ── Threat Intel Tests ─────────────────────────────────────────────────────────
 
@@ -242,6 +268,76 @@ class TestEnrichIP:
         assert cls == 'UNKNOWN'
         assert 'Invalid' in src
 
+    # ── SSH Brute Force Auto-Triage ────────────────────────────────────────
+
+    def test_ssh_credential_spray_auto_tp(self):
+        """Many distinct usernames from one source → credential spray → TRUE POSITIVE."""
+        alert = {
+            'event_count': 20,
+            'detection_type': 'ssh_brute_force',
+            'metrics': {'username_diversity': 10, 'timing_stddev': 15.0}
+        }
+        cls, src, details = enrich_ip('10.0.0.5', alert, {}, {})
+        assert cls == 'TRUE POSITIVE'
+        assert 'Credential Spray' in src
+        assert 'distinct usernames' in details.get('reason', '')
+
+    def test_ssh_scripted_attack_auto_tp(self):
+        """Low-variance timing across many attempts → scripted attack → TRUE POSITIVE."""
+        alert = {
+            'event_count': 20,
+            'detection_type': 'ssh_brute_force',
+            'metrics': {'username_diversity': 1, 'timing_stddev': 2.0}
+        }
+        cls, src, details = enrich_ip('10.0.0.5', alert, {}, {})
+        assert cls == 'TRUE POSITIVE'
+        assert 'Scripted Attack' in src
+
+    def test_ssh_single_user_stays_unknown(self):
+        """Single username retried with irregular timing → could be legit → stays UNKNOWN."""
+        alert = {
+            'event_count': 10,
+            'detection_type': 'ssh_brute_force',
+            'metrics': {'username_diversity': 1, 'timing_stddev': 30.0}
+        }
+        cls, src, _ = enrich_ip('10.0.0.5', alert, {}, {})
+        assert cls == 'UNKNOWN'
+
+    # ── HTTP Error Auto-Triage ─────────────────────────────────────────────
+
+    def test_http_path_scanning_auto_tp(self):
+        """Many distinct URIs probed → path scanning → TRUE POSITIVE."""
+        alert = {
+            'event_count': 50,
+            'detection_type': 'http_error',
+            'metrics': {'uri_diversity': 40, 'timing_stddev': 0.5}
+        }
+        cls, src, details = enrich_ip('10.0.0.5', alert, {}, {})
+        assert cls == 'TRUE POSITIVE'
+        assert 'Path Scanning' in src
+
+    def test_http_app_retry_auto_fp(self):
+        """Same endpoint hit repeatedly → app retry logic → FALSE POSITIVE."""
+        alert = {
+            'event_count': 100,
+            'detection_type': 'http_error',
+            'metrics': {'uri_diversity': 2, 'timing_stddev': 1.0}
+        }
+        cls, src, details = enrich_ip('10.0.0.5', alert, {}, {})
+        assert cls == 'FALSE POSITIVE'
+        assert 'App Retry' in src
+
+    def test_http_moderate_stays_unknown(self):
+        """Moderate URI diversity → uncertain → stays UNKNOWN."""
+        alert = {
+            'event_count': 15,
+            'detection_type': 'http_error',
+            'metrics': {'uri_diversity': 10, 'timing_stddev': 5.0}
+        }
+        cls, src, _ = enrich_ip('10.0.0.5', alert, {}, {})
+        assert cls == 'UNKNOWN'
+
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+

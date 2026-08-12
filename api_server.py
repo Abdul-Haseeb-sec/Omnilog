@@ -21,6 +21,13 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import dpkt
+import re
+
+# --- Heuristic Patterns ---
+RE_KERB = re.compile(b'\x1b([\x01-\x1f])([a-zA-Z0-9_.-]{3,20})')
+RE_SMB = re.compile(b'([A-Z]\x00(?:[a-z]\x00)+ \x00[A-Z]\x00(?:[a-z]\x00)+)')
+BLACKLIST_SMB = {'System Access', 'Kerberos Policy', 'Registry Values', 'Microsoft Enhanced', 'Cryptographic Provider'}
+BLACKLIST_KERB = {'krbtgt', 'cifs', 'ldap', 'host'}
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 load_dotenv()
@@ -33,9 +40,11 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 API_PORT = int(os.getenv("API_PORT", "5000"))
 SUBPROCESS_TIMEOUT = int(os.getenv("SUBPROCESS_TIMEOUT", "120"))
 
-ALLOWED_EXTENSIONS = ('.log', '.csv', '.tsv', '.json', '.jsonl', '.gz', '.txt', '.pcap', '.xml')
+ALLOWED_EXTENSIONS = ('.log', '.csv', '.tsv', '.json', '.jsonl', '.gz', '.txt', '.pcap', '.pcapng', '.cap', '.xml')
 VALID_CLASSIFICATIONS = frozenset({"TRUE POSITIVE", "FALSE POSITIVE"})
-REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reports')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPORTS_DIR = os.path.join(SCRIPT_DIR, 'reports')
+INTEL_FILE = os.path.join(SCRIPT_DIR, 'threat_intel.json')
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -52,6 +61,28 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
 CORS(app, origins=ALLOWED_ORIGINS)
 os.makedirs(REPORTS_DIR, exist_ok=True)
+
+
+# ── PCAP Linktype Constants ────────────────────────────────────────────────────
+DLT_EN10MB = 1         # Ethernet
+DLT_LINUX_SLL = 113    # Linux "cooked" capture (tcpdump -i any)
+DLT_RAW_VALUES = frozenset({12, 14, 101})  # Raw IP (varies by platform)
+
+
+def _atomic_write_json(path, data):
+    """Write JSON atomically via temp file + os.replace to prevent corruption."""
+    dir_name = os.path.dirname(path) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ── PCAP Extraction ────────────────────────────────────────────────────────────
@@ -75,23 +106,32 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
       • HTTP responses    → status_code for 4xx/5xx detection
     """
     stats = {"tcp_connections": 0, "dns_events": 0, "http_events": 0,
-             "packets_read": 0, "errors": 0}
+             "packets_read": 0, "errors": 0, "linktype": None}
 
     with open(pcap_path, 'rb') as f:
         pcap = _open_pcap(f)
+        linktype = pcap.datalink()
+        stats["linktype"] = linktype
+
+        if linktype != DLT_EN10MB and linktype != DLT_LINUX_SLL and linktype not in DLT_RAW_VALUES:
+            log.warning("Unsupported PCAP linktype %d — supported: Ethernet (1), Linux SLL (113), Raw IP (12/14/101)", linktype)
+            return stats
 
         with open(output_path, 'w', encoding='utf-8') as out:
             for ts, buf in pcap:
                 stats["packets_read"] += 1
                 try:
-                    # Ethernet → IP, fallback to raw IP
-                    try:
+                    # Dispatch by linktype — no guessing
+                    src_mac = None
+                    if linktype == DLT_EN10MB:
                         eth = dpkt.ethernet.Ethernet(buf)
                         ip_pkt = eth.data
                         src_mac = ':'.join('%02x' % b for b in eth.src)
-                    except (dpkt.UnpackError, dpkt.NeedData):
+                    elif linktype == DLT_LINUX_SLL:
+                        sll = dpkt.sll.SLL(buf)
+                        ip_pkt = sll.data
+                    else:  # DLT_RAW
                         ip_pkt = dpkt.ip.IP(buf)
-                        src_mac = None
 
                     if not isinstance(ip_pkt, dpkt.ip.IP):
                         continue
@@ -137,6 +177,30 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                     stats["http_events"] += 1
                             except Exception:
                                 pass
+                                
+                        elif tcp.sport in (88, 445) or tcp.dport in (88, 445):
+                            payload = tcp.data
+                            if payload:
+                                if tcp.sport == 88 or tcp.dport == 88:
+                                    for match in RE_KERB.finditer(payload):
+                                        length = match.group(1)[0]
+                                        string = match.group(2)
+                                        if length == len(string):
+                                            decoded = string.decode('utf-8', errors='ignore')
+                                            if decoded.lower() not in BLACKLIST_KERB and '.' not in decoded:
+                                                out.write(json.dumps({
+                                                    "ts": ts, "intel_type": "host_profile",
+                                                    "ip": src_ip, "windows_user": decoded
+                                                }) + '\n')
+                                                
+                                if tcp.sport == 445 or tcp.dport == 445:
+                                    for match in RE_SMB.finditer(payload):
+                                        decoded = match.group(1).decode('utf-16le', errors='ignore')
+                                        if decoded not in BLACKLIST_SMB:
+                                            out.write(json.dumps({
+                                                "ts": ts, "intel_type": "host_profile",
+                                                "ip": src_ip, "full_name": decoded
+                                            }) + '\n')
 
                     # ── UDP / DNS ──────────────────────────────────────────
                     elif isinstance(ip_pkt.data, dpkt.udp.UDP):
@@ -176,6 +240,20 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                         }) + '\n')
                             except Exception:
                                 pass
+                                
+                        elif udp.sport == 88 or udp.dport == 88:
+                            payload = udp.data
+                            if payload:
+                                for match in RE_KERB.finditer(payload):
+                                    length = match.group(1)[0]
+                                    string = match.group(2)
+                                    if length == len(string):
+                                        decoded = string.decode('utf-8', errors='ignore')
+                                        if decoded.lower() not in BLACKLIST_KERB and '.' not in decoded:
+                                            out.write(json.dumps({
+                                                "ts": ts, "intel_type": "host_profile",
+                                                "ip": src_ip, "windows_user": decoded
+                                            }) + '\n')
 
                 except Exception:
                     stats["errors"] += 1
@@ -212,7 +290,8 @@ def upload_file():
         process_path = file_path
         pcap_stats = None
 
-        is_pcap = safe_name.lower().endswith('.pcap') or safe_name.lower().endswith('.pcap.gz')
+        _lower = safe_name.lower()
+        is_pcap = any(_lower.endswith(ext) for ext in ('.pcap', '.pcapng', '.cap', '.pcap.gz', '.pcapng.gz', '.cap.gz'))
 
         # ── Decompress .gz with size guard ─────────────────────────────────
         if safe_name.lower().endswith('.gz'):
@@ -239,7 +318,12 @@ def upload_file():
             log.info("PCAP extraction: %s", pcap_stats)
             total_events = pcap_stats["tcp_connections"] + pcap_stats["dns_events"] + pcap_stats["http_events"]
             if total_events == 0:
-                return jsonify({'error': 'No analyzable events found in PCAP', 'stats': pcap_stats}), 400
+                return jsonify({
+                    'error': 'No analyzable events found in PCAP',
+                    'stats': pcap_stats,
+                    'hint': f"Linktype={pcap_stats.get('linktype', 'unknown')}, packets_read={pcap_stats['packets_read']}. "
+                            f"If packets were read but 0 events extracted, the capture may not contain TCP/DNS/HTTP traffic."
+                }), 400
 
         # ── Run the detection harness ──────────────────────────────────────
         log.info("Analyzing: %s (id=%s)", safe_name, request_id)
@@ -258,7 +342,6 @@ def upload_file():
                             'logs': result.stdout + result.stderr}), 500
 
         output_logs = result.stdout + "\n" + result.stderr
-        import re
         parsed_match = re.search(r"Parsed (\d+)/(\d+) usable records", output_logs)
         if parsed_match:
             yielded = int(parsed_match.group(1))
@@ -317,18 +400,16 @@ def mark_intel():
     if classification not in VALID_CLASSIFICATIONS:
         return jsonify({'error': f'Invalid classification. Must be one of: {", ".join(sorted(VALID_CLASSIFICATIONS))}'}), 400
 
-    intel_file = 'threat_intel.json'
     intel_data = {}
-    if os.path.exists(intel_file):
+    if os.path.exists(INTEL_FILE):
         try:
-            with open(intel_file, 'r', encoding='utf-8') as f:
+            with open(INTEL_FILE, 'r', encoding='utf-8') as f:
                 intel_data = json.load(f)
         except (json.JSONDecodeError, OSError):
             log.warning("Corrupt threat_intel.json — starting fresh")
 
     intel_data[ip] = {"classification": classification, "source": "Manual Tag"}
-    with open(intel_file, 'w', encoding='utf-8') as f:
-        json.dump(intel_data, f, indent=2)
+    _atomic_write_json(INTEL_FILE, intel_data)
 
     log.info("Tagged %s → %s (manual)", ip, classification)
     return jsonify({'success': True, 'message': f'{ip} tagged as {classification}'})
@@ -337,11 +418,10 @@ def mark_intel():
 @app.route('/threat_intel', methods=['GET'])
 def get_threat_intel():
     """Return the full local threat-intel database for UI browsing."""
-    intel_file = 'threat_intel.json'
-    if not os.path.exists(intel_file):
+    if not os.path.exists(INTEL_FILE):
         return jsonify({}), 200
     try:
-        with open(intel_file, 'r', encoding='utf-8') as f:
+        with open(INTEL_FILE, 'r', encoding='utf-8') as f:
             return jsonify(json.load(f)), 200
     except (json.JSONDecodeError, OSError):
         return jsonify({}), 200
@@ -355,19 +435,17 @@ def delete_threat_intel(ip_addr):
     except ValueError:
         return jsonify({'error': f'Invalid IP: {ip_addr}'}), 400
 
-    intel_file = 'threat_intel.json'
-    if not os.path.exists(intel_file):
+    if not os.path.exists(INTEL_FILE):
         return jsonify({'error': 'Not found'}), 404
 
-    with open(intel_file, 'r', encoding='utf-8') as f:
+    with open(INTEL_FILE, 'r', encoding='utf-8') as f:
         intel_data = json.load(f)
 
     if ip_addr not in intel_data:
         return jsonify({'error': 'IP not in database'}), 404
 
     del intel_data[ip_addr]
-    with open(intel_file, 'w', encoding='utf-8') as f:
-        json.dump(intel_data, f, indent=2)
+    _atomic_write_json(INTEL_FILE, intel_data)
 
     log.info("Removed %s from threat intel", ip_addr)
     return jsonify({'success': True, 'message': f'{ip_addr} removed'})

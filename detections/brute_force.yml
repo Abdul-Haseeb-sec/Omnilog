@@ -16,22 +16,33 @@ detection:
     condition: selection
 level: informational
 ---
-title: Slow SSH Brute Force (Correlation)
+title: SSH Brute Force (Correlation)
 id: 8b072236-4074-4735-b286-9dc4bfa4f40d
 status: experimental
-description: Detects a slow SSH brute force attack by aggregating failed authentication attempts from a single source IP over an extended timeframe (1 hour). This is designed to bypass traditional short-window threshold detections.
+description: |
+  Detects SSH brute force attacks by aggregating failed authentication attempts
+  from a single source IP. The engine uses cumulative counting (no time-window
+  eviction) to prevent slow attacks from evading detection by straddling a
+  window boundary. This is a deliberate design choice for analyzing bounded,
+  already-collected log files.
+
+  NOTE: This Sigma file documents the intended detection rule. The current
+  engine implements it as a fixed Python heuristic in test_harness.py, not
+  as a pySigma-driven evaluator. Sigma integration is on the roadmap.
 author: Detection Engineering Team
-date: 2026-08-10
+date: 2026-08-12
 correlation:
     type: event_count
     rules:
         - d17df3d4-b778-4395-9bf6-b5fa53f20ba5
     group-by:
         - id.orig_h
-    timespan: 1h
+    # Engine uses cumulative counting (no time-window eviction).
+    # timespan is documented here for reference but is not enforced at runtime.
+    timespan: cumulative
     condition:
-        gte: 15
+        gte: 5
 level: medium
 falsepositives:
-    - Legitimate users failing authentication multiple times over an hour (rare to exceed 15 times though).
+    - Legitimate users failing authentication multiple times (rare to exceed 5 times).
     - Misconfigured internal scripts or cron jobs attempting to authenticate with expired credentials.

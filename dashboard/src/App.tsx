@@ -36,7 +36,7 @@ interface RunSummary {
   rule_name: string
 }
 
-const API = 'http://localhost:5000'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 
 function App() {
   const [report, setReport] = useState<Report | null>(null)
@@ -106,13 +106,27 @@ function App() {
     } catch { alert('Failed to load report') }
   }
 
+  const escapeCSVField = (value: string): string => {
+    if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+      return '"' + value.replace(/"/g, '""') + '"'
+    }
+    return value
+  }
+
   const exportCSV = () => {
     if (!report) return
     const meta = `# Omnilog Export\n# Minimum Event Threshold: ${report.threshold}\n`
     const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count\n'
-    const rows = report.alerts.map(a =>
-      `${a.source_ip},${a.classification},${a.classification_source || ''},${a.detection_label || ''},${a.detection_confidence || ''},${a.window_start},${a.window_end},${a.event_count}`
-    ).join('\n')
+    const rows = report.alerts.map(a => [
+      a.source_ip,
+      a.classification,
+      a.classification_source || '',
+      a.detection_label || '',
+      a.detection_confidence || '',
+      a.window_start,
+      a.window_end,
+      String(a.event_count)
+    ].map(escapeCSVField).join(',')).join('\n')
     const blob = new Blob([meta + h + rows], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -218,10 +232,10 @@ function App() {
                 <div className="detail-item">
                   <span className="detail-label">Confidence</span>
                   <span className="detail-value">
-                    <span className={`badge ${selectedAlert.detection_confidence === 'verified' ? 'ok' : 'info'}`}>
-                      {selectedAlert.detection_confidence || 'verified'}
+                    <span className={`badge ${selectedAlert.detection_confidence === 'Parsed Log' ? 'ok' : 'info'}`}>
+                      {selectedAlert.detection_confidence || 'Parsed Log'}
                     </span>
-                    {selectedAlert.detection_confidence === 'heuristic' && (
+                    {selectedAlert.detection_confidence === 'Heuristic (PCAP)' && (
                       <span className="source-tag" title="PCAP SSH detection counts connection attempts (SYN packets), not actual auth results — SSH traffic is encrypted">⚠ PCAP heuristic</span>
                     )}
                   </span>
@@ -344,7 +358,7 @@ function App() {
         <div className="flex-center gap-sm">
           <input
             type="file"
-            accept=".json,.jsonl,.log,.tsv,.csv,.gz,.pcap,.xml,.txt"
+            accept=".json,.jsonl,.log,.tsv,.csv,.gz,.pcap,.pcapng,.cap,.xml,.txt"
             style={{ display: 'none' }}
             ref={fileInputRef}
             onChange={handleUpload}
