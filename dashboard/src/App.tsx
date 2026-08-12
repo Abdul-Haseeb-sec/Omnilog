@@ -37,6 +37,9 @@ interface RunSummary {
 }
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000'
+const API_KEY = import.meta.env.VITE_API_KEY || ''
+const authHeaders = API_KEY ? { 'X-API-Key': API_KEY } : {}
+
 
 function App() {
   const [report, setReport] = useState<Report | null>(null)
@@ -65,14 +68,14 @@ function App() {
 
   const loadIntel = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/threat_intel`)
+      const res = await fetch(`${API}/threat_intel`, { headers: authHeaders })
       if (res.ok) setIntelData(await res.json())
     } catch { /* backend offline */ }
   }, [])
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/reports`)
+      const res = await fetch(`${API}/reports`, { headers: authHeaders })
       if (res.ok) setRuns(await res.json())
     } catch { /* backend offline */ }
   }, [])
@@ -84,7 +87,11 @@ function App() {
     const fd = new FormData()
     fd.append('file', file)
     try {
-      const res = await fetch(`${API}/upload`, { method: 'POST', body: fd })
+      const res = await fetch(`${API}/upload`, { 
+        method: 'POST', 
+        headers: authHeaders,
+        body: fd 
+      })
       if (!res.ok) {
         const err = await res.json()
         alert('Error: ' + err.error + (err.logs ? '\n\nLogs:\n' + err.logs : ''))
@@ -101,7 +108,7 @@ function App() {
 
   const loadReport = async (id: string) => {
     try {
-      const res = await fetch(`${API}/reports/${id}`)
+      const res = await fetch(`${API}/reports/${id}`, { headers: authHeaders })
       if (res.ok) { setReport(await res.json()); setShowHistory(false) }
     } catch { alert('Failed to load report') }
   }
@@ -140,7 +147,10 @@ function App() {
     try {
       const res = await fetch(`${API}/mark_intel`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...authHeaders
+        },
         body: JSON.stringify({ ip, classification }),
       })
       if (res.ok) {
@@ -156,7 +166,10 @@ function App() {
 
   const deleteIntel = async (ip: string) => {
     try {
-      const res = await fetch(`${API}/threat_intel/${ip}`, { method: 'DELETE' })
+      const res = await fetch(`${API}/threat_intel/${ip}`, { 
+        method: 'DELETE',
+        headers: authHeaders
+      })
       if (res.ok) { const next = { ...intelData }; delete next[ip]; setIntelData(next) }
     } catch { /* ignore */ }
   }
