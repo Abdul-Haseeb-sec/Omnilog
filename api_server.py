@@ -141,13 +141,22 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                         sll = dpkt.sll.SLL(buf)
                         ip_pkt = sll.data
                     else:  # DLT_RAW
-                        ip_pkt = dpkt.ip.IP(buf)
+                        version = buf[0] >> 4
+                        if version == 6:
+                            ip_pkt = dpkt.ip6.IP6(buf)
+                        else:
+                            ip_pkt = dpkt.ip.IP(buf)
 
-                    if not isinstance(ip_pkt, dpkt.ip.IP):
+                    if isinstance(ip_pkt, dpkt.ip.IP):
+                        src_ip = socket.inet_ntop(socket.AF_INET, ip_pkt.src)
+                        dst_ip = socket.inet_ntop(socket.AF_INET, ip_pkt.dst)
+                    elif isinstance(ip_pkt, dpkt.ip6.IP6):
+                        src_ip = socket.inet_ntop(socket.AF_INET6, ip_pkt.src)
+                        dst_ip = socket.inet_ntop(socket.AF_INET6, ip_pkt.dst)
+                    else:
                         continue
 
-                    src_ip = socket.inet_ntoa(ip_pkt.src)
-                    
+
                     if src_mac:
                         out.write(json.dumps({
                             "ts": ts, "intel_type": "host_profile",
@@ -160,9 +169,7 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                         is_syn = bool(tcp.flags & dpkt.tcp.TH_SYN) and not bool(tcp.flags & dpkt.tcp.TH_ACK)
 
                         if is_syn:
-                            src = socket.inet_ntoa(ip_pkt.src)
-                            dst = socket.inet_ntoa(ip_pkt.dst)
-                            rec = {"ts": ts, "id.orig_h": src, "id.resp_h": dst,
+                            rec = {"ts": ts, "id.orig_h": src_ip, "id.resp_h": dst_ip,
                                    "id.resp_p": tcp.dport, "proto": "tcp",
                                    "pcap_event": "syn"}
                             if tcp.dport == 22:
@@ -175,12 +182,10 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                         elif tcp.sport in (80, 8080, 8000) and tcp.data:
                             try:
                                 if tcp.data[:4] == b'HTTP':
-                                    src = socket.inet_ntoa(ip_pkt.src)
-                                    dst = socket.inet_ntoa(ip_pkt.dst)
                                     resp = dpkt.http.Response(tcp.data)
                                     out.write(json.dumps({
-                                        "ts": ts, "id.orig_h": dst,
-                                        "id.resp_h": src, "id.resp_p": tcp.sport,
+                                        "ts": ts, "id.orig_h": dst_ip,
+                                        "id.resp_h": src_ip, "id.resp_p": tcp.sport,
                                         "proto": "tcp", "service": "http",
                                         "status_code": resp.status,
                                     }) + '\n')
@@ -195,8 +200,6 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                             try:
                                 dns = dpkt.dns.DNS(udp.data)
                                 if dns.qr == dpkt.dns.DNS_R:
-                                    src = socket.inet_ntoa(ip_pkt.src)
-                                    dst = socket.inet_ntoa(ip_pkt.dst)
                                     rcode_map = {
                                         dpkt.dns.DNS_RCODE_NXDOMAIN: "NXDOMAIN",
                                         dpkt.dns.DNS_RCODE_SERVFAIL: "SERVFAIL",
@@ -205,8 +208,8 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                     rcode = rcode_map.get(dns.rcode, f"RCODE_{dns.rcode}")
                                     qname = dns.qd[0].name if dns.qd else ""
                                     out.write(json.dumps({
-                                        "ts": ts, "id.orig_h": dst,
-                                        "id.resp_h": src, "proto": "udp",
+                                        "ts": ts, "id.orig_h": dst_ip,
+                                        "id.resp_h": src_ip, "proto": "udp",
                                         "service": "dns", "rcode_name": rcode,
                                         "query": qname,
                                     }) + '\n')

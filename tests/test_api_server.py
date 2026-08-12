@@ -115,6 +115,50 @@ class TestUpload:
         assert 'alerts' in report
         assert 'timestamp' in report
 
+    def test_ipv6_ssh_syn(self, client):
+        """IPv6 SSH SYN should be processed correctly and generate an alert if it crosses threshold."""
+        import dpkt
+        import socket
+        import time
+        
+        # Build synthetic pcap with IPv6 TCP SYN to port 22
+        buf = io.BytesIO()
+        writer = dpkt.pcap.Writer(buf)
+        
+        src_ip6 = socket.inet_pton(socket.AF_INET6, '2001:db8::1')
+        dst_ip6 = socket.inet_pton(socket.AF_INET6, '2001:db8::2')
+        
+        for i in range(15):  # enough to trigger brute force
+            tcp = dpkt.tcp.TCP(
+                sport=50000 + i,
+                dport=22,
+                flags=dpkt.tcp.TH_SYN
+            )
+            ip = dpkt.ip6.IP6(
+                src=src_ip6,
+                dst=dst_ip6,
+                nxt=dpkt.ip.IP_PROTO_TCP,
+                data=tcp
+            )
+            # Link type Ethernet
+            eth = dpkt.ethernet.Ethernet(
+                type=dpkt.ethernet.ETH_TYPE_IP6,
+                data=ip
+            )
+            writer.writepkt(eth, ts=1000.0 + i)
+            
+        buf.seek(0)
+        data = {'file': (buf, 'ipv6_ssh.pcap')}
+        res = client.post('/upload', data=data, content_type='multipart/form-data')
+        assert res.status_code == 200
+        report = res.get_json()
+        
+        # Should have an alert for IPv6
+        alerts = report.get('alerts', [])
+        assert len(alerts) > 0
+        assert alerts[0]['source_ip'] == '2001:db8::1'
+        assert alerts[0]['detection_type'] == 'ssh_brute_force'
+
 
 # ── Threat Intel Endpoints ─────────────────────────────────────────────────────
 
