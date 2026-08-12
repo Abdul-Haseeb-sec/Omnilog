@@ -38,7 +38,7 @@ interface RunSummary {
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 const API_KEY = import.meta.env.VITE_API_KEY || ''
-const authHeaders = API_KEY ? { 'X-API-Key': API_KEY } : {}
+const authHeaders: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {}
 
 
 function App() {
@@ -219,11 +219,11 @@ function App() {
               <div className="detail-grid">
                 <div className="detail-item">
                   <span className="detail-label">Classification</span>
-                  <span className="detail-value">
+                  <span className="detail-value" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
                     <span className={`badge ${selectedAlert.classification === 'TRUE POSITIVE' ? 'critical' : selectedAlert.classification === 'FALSE POSITIVE' ? 'warn' : 'ok'}`}>
                       {selectedAlert.classification}
                     </span>
-                    {selectedAlert.classification_source && <span className="source-tag">{selectedAlert.classification_source}</span>}
+                    {selectedAlert.classification_source && <span className="source-tag" style={{ marginLeft: 0 }}>{selectedAlert.classification_source}</span>}
                   </span>
                 </div>
                 <div className="detail-item">
@@ -496,10 +496,12 @@ function App() {
                   {filteredAlerts.map((a, i) => (
                     <tr key={i} className="alert-row-enter">
                       <td>
-                        <span className={`badge ${a.classification === 'TRUE POSITIVE' ? 'critical' : a.classification === 'FALSE POSITIVE' ? 'warn' : 'ok'}`}>
-                          {a.classification}
-                        </span>
-                        {a.classification_source && <span className="source-tag">{a.classification_source}</span>}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
+                          <span className={`badge ${a.classification === 'TRUE POSITIVE' ? 'critical' : a.classification === 'FALSE POSITIVE' ? 'warn' : 'ok'}`}>
+                            {a.classification}
+                          </span>
+                          {a.classification_source && <span className="source-tag" style={{ marginLeft: 0 }}>{a.classification_source}</span>}
+                        </div>
                       </td>
                       <td className="data-text" title={a.source_ip}>{a.source_ip}</td>
                       <td className="data-text" title={a.detection_label}>{a.detection_label?.split('(')[0]?.trim() || a.detection_type || '—'}</td>
