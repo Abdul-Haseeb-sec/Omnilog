@@ -68,6 +68,16 @@ cd dashboard && npm run dev
 
 1. Open `http://localhost:5173`
 2. Click **Upload Data** and select a `.pcap`, `.pcapng`, `.cap`, `.log`, `.csv`, `.json`, or `.gz` file
+
+## Production Deployment
+
+For production deployments, you should use a production WSGI server like Gunicorn instead of the Flask development server. Ensure you have set the `API_KEY` in your `.env` file to protect the API endpoints.
+
+**Start the backend using Gunicorn:**
+```bash
+./run_prod.sh
+```
+*(This script runs `gunicorn --workers 4 --bind 0.0.0.0:$API_PORT api_server:app`)*
 3. **Interactive Filtering:** Click the stat cards (True Positives, False Positives, Needs Review) to instantly filter the dashboard view.
 4. Review alerts — click any row to see the full detail breakdown, timeline, and intel.
 5. Tag unknown IPs as malicious or safe — your tags persist across sessions.
