@@ -232,17 +232,14 @@ h1, h2, h3, h4, h5, h6 {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.875rem;
-  table-layout: fixed;
 }
 
 .data-table th,
 .data-table td {
-  padding: 0.75rem 0.75rem;
+  padding: 0.75rem 1rem;
   text-align: left;
   border-bottom: 1px solid var(--hairline);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  vertical-align: middle;
 }
 
 .data-table th {
@@ -251,26 +248,15 @@ h1, h2, h3, h4, h5, h6 {
   font-size: 0.75rem;
   text-transform: uppercase;
   font-weight: normal;
+  white-space: nowrap;
 }
 
-/* Column widths — fixed layout prevents content from blowing out */
-.data-table th:nth-child(1),
-.data-table td:nth-child(1) { width: 28%; }  /* Class + source tag */
-.data-table th:nth-child(2),
-.data-table td:nth-child(2) { width: 16%; }  /* Source IP */
-.data-table th:nth-child(3),
-.data-table td:nth-child(3) { width: 18%; }  /* Detection */
-.data-table th:nth-child(4),
-.data-table td:nth-child(4) { width: 14%; }  /* Evidence */
-.data-table th:nth-child(5),
-.data-table td:nth-child(5) { width: 8%; }   /* Events */
-.data-table th:nth-child(6),
-.data-table td:nth-child(6) { width: 16%; }  /* Actions */
+.data-table td {
+  white-space: nowrap;
+}
 
-/* Allow the Class column to wrap badge + source-tag */
-.data-table td:nth-child(1) {
+.data-table td:first-child {
   white-space: normal;
-  overflow: visible;
 }
 
 .data-table tr {
