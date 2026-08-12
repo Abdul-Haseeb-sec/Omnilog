@@ -248,6 +248,43 @@ class TestEvaluateRules:
         assert alerts[0]['dynamic_context']['MAC Address'] == 'aa:bb:cc:dd:ee:ff'
         assert alerts[0]['dynamic_context']['Host Name'] == 'test-win-pc'
 
+    def test_dynamic_sigma_rule(self):
+        """A new YAML rule should be loaded and evaluated automatically."""
+        import tempfile
+        import os
+        from validation.test_harness import HARNESS_DIR, load_yaml_rules
+        
+        rule_yaml = '''
+title: Custom Web Shell Detection
+id: custom-id
+detection:
+    selection:
+        uri: /cmd.php
+        status_code: 200
+    condition: selection
+correlation:
+    condition:
+        gte: 2
+'''
+        rule_path = os.path.join(HARNESS_DIR, 'detections', 'test_webshell.yml')
+        with open(rule_path, 'w') as f:
+            f.write(rule_yaml)
+            
+        try:
+            load_yaml_rules()
+            events = [
+                {'ts': str(1000 + i), 'id.orig_h': '10.10.10.10', 'uri': '/cmd.php', 'status_code': 200}
+                for i in range(2)
+            ]
+            # pass threshold=None so it uses the rule's threshold (2)
+            alerts = evaluate_rules(iter(events), threshold=None)
+            assert len(alerts) == 1
+            assert alerts[0]['detection_type'] == 'custom_web_shell_detection'
+            assert alerts[0]['event_count'] == 2
+        finally:
+            os.remove(rule_path)
+            load_yaml_rules() # reload to clean up
+
 
 # ── Threat Intel Tests ─────────────────────────────────────────────────────────
 

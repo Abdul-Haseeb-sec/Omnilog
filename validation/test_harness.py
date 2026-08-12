@@ -24,6 +24,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 import collections
 from collections import deque
+import glob
+import yaml
 
 from dotenv import load_dotenv
 
@@ -36,11 +38,75 @@ logging.basicConfig(
 )
 log = logging.getLogger("harness")
 
+# ── Setup & Constants ──────────────────────────────────────────────────────────
+
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_API_KEY", "").strip()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else os.getcwd()
 HARNESS_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == 'validation' else SCRIPT_DIR
 INTEL_CACHE_FILE = os.path.join(HARNESS_DIR, "intel_cache.json")
 CACHE_TTL_HOURS = 24
+
+# ── Custom Minimal YAML Rule Engine ────────────────────────────────────────────
+
+class DetectionRule:
+    def __init__(self, name, selection, threshold, type_name):
+        self.name = name
+        self.selection = selection
+        self.threshold = threshold
+        self.type_name = type_name
+
+    def match(self, record):
+        for k, v in self.selection.items():
+            val = record.get(k)
+            if val is None:
+                return False
+            if isinstance(v, bool):
+                val_lower = str(val).lower()
+                expected = 'true' if v else 'false'
+                short = 't' if v else 'f'
+                if val_lower not in (expected, short):
+                    return False
+            else:
+                if str(val).lower() != str(v).lower():
+                    return False
+        return True
+
+LOADED_RULES = []
+
+def load_yaml_rules():
+    global LOADED_RULES
+    LOADED_RULES = []
+    
+    detections_dir = os.path.join(HARNESS_DIR, 'detections')
+    if not os.path.exists(detections_dir):
+        return
+        
+    for path in glob.glob(os.path.join(detections_dir, '*.yml')):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                docs = list(yaml.safe_load_all(f))
+                selection = {}
+                rule_name = None
+                threshold = None
+                
+                for doc in docs:
+                    if 'detection' in doc and 'selection' in doc['detection']:
+                        selection = doc['detection']['selection']
+                        if not rule_name:
+                            rule_name = doc.get('title', 'Unknown Rule')
+                    if 'correlation' in doc:
+                        rule_name = doc.get('title', rule_name)
+                        cond = doc['correlation'].get('condition', {})
+                        if 'gte' in cond:
+                            threshold = int(cond['gte'])
+                            
+                if selection:
+                    type_name = 'ssh_brute_force' if 'SSH' in rule_name else rule_name.lower().replace(' ', '_')
+                    LOADED_RULES.append(DetectionRule(rule_name, selection, threshold, type_name))
+        except Exception as e:
+            log.warning(f"Failed to load rule {path}: {e}")
+
+load_yaml_rules()
 
 # ── Syslog regex patterns ─────────────────────────────────────────────────────
 SYSLOG_TS = re.compile(r'^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+')
@@ -343,7 +409,7 @@ def _shannon_entropy(s):
     return -sum((c / length) * math.log2(c / length) for c in counts.values())
 
 
-def evaluate_rules(records, threshold=5, window_hours=1):
+def evaluate_rules(records, threshold=None, window_hours=1):
     """
     O(N) streaming cumulative anomaly detection.
 
@@ -385,26 +451,30 @@ def evaluate_rules(records, threshold=5, window_hours=1):
         is_error = False
         detection_type = None
 
-        if 'auth_success' in record:
-            auth = record['auth_success']
-            if auth is False or auth in ('F', 'false'):
+        # Check YAML rules first
+        for rule in LOADED_RULES:
+            if rule.match(record):
                 is_error = True
-                detection_type = 'ssh_brute_force'
-        elif 'rcode_name' in record:
-            rcode = record['rcode_name']
-            if rcode in ('NXDOMAIN', 'SERVFAIL'):
-                is_error = True
-                detection_type = 'dns_anomaly'
-        elif 'status_code' in record:
-            try:
-                if int(record['status_code']) >= 400:
+                detection_type = rule.type_name
+                break
+
+        # Fallback to legacy hardcoded rules for DNS/HTTP
+        if not is_error:
+            if 'rcode_name' in record:
+                rcode = record['rcode_name']
+                if rcode in ('NXDOMAIN', 'SERVFAIL'):
                     is_error = True
-                    detection_type = 'http_error'
-            except (ValueError, TypeError):
-                pass
-        elif record.get('error') or record.get('failure'):
-            is_error = True
-            detection_type = 'generic_error'
+                    detection_type = 'dns_anomaly'
+            elif 'status_code' in record:
+                try:
+                    if int(record['status_code']) >= 400:
+                        is_error = True
+                        detection_type = 'http_error'
+                except (ValueError, TypeError):
+                    pass
+            elif record.get('error') or record.get('failure'):
+                is_error = True
+                detection_type = 'generic_error'
 
         if not is_error:
             continue
@@ -452,9 +522,18 @@ def evaluate_rules(records, threshold=5, window_hours=1):
 
         # Cumulative counting — no eviction. See docstring for rationale.
         current_count = sum(type_counts[orig_h].values())
+        dominant = max(type_counts[orig_h], key=type_counts[orig_h].get)
 
-        if current_count >= threshold:
-            dominant = max(type_counts[orig_h], key=type_counts[orig_h].get)
+        # Apply rule-specific threshold if available and no override provided
+        rule_threshold = threshold
+        if rule_threshold is None:
+            rule_threshold = 5 # fallback
+            for r in LOADED_RULES:
+                if r.type_name == dominant and r.threshold is not None:
+                    rule_threshold = r.threshold
+                    break
+
+        if current_count >= rule_threshold:
 
             if orig_h in alerted:
                 # Update existing alert in place (§2.5 fix) in O(1) time
