@@ -237,6 +237,17 @@ class TestEvaluateRules:
         assert 'metrics' in alerts[0]
         assert alerts[0]['metrics']['uri_diversity'] == 15
 
+    def test_host_profile_enrichment(self):
+        """MAC and DHCP hostname from host_profile intel records should populate dynamic_context."""
+        events = [
+            {'intel_type': 'host_profile', 'ip': '9.9.9.9', 'mac': 'aa:bb:cc:dd:ee:ff', 'hostname': 'test-win-pc'},
+        ] + self._make_ssh_events('9.9.9.9', 15)
+        alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
+        assert len(alerts) == 1
+        assert 'dynamic_context' in alerts[0]
+        assert alerts[0]['dynamic_context']['MAC Address'] == 'aa:bb:cc:dd:ee:ff'
+        assert alerts[0]['dynamic_context']['Host Name'] == 'test-win-pc'
+
 
 # ── Threat Intel Tests ─────────────────────────────────────────────────────────
 

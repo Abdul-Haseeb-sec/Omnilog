@@ -367,8 +367,21 @@ def evaluate_rules(records, threshold=5, window_hours=1):
     dns_arrival_times = collections.defaultdict(list)
     ssh_arrival_times = collections.defaultdict(list)
     http_arrival_times = collections.defaultdict(list)
+    mac_to_hostname = {}
+    ip_to_mac = {}
 
     for record in records:
+        if record.get('intel_type') == 'host_profile':
+            ip = record.get('ip')
+            mac = record.get('mac')
+            hostname = record.get('hostname')
+            
+            if mac and hostname:
+                mac_to_hostname[mac] = hostname
+            if ip and mac and ip != '0.0.0.0':
+                ip_to_mac[ip] = mac
+            continue
+            
         is_error = False
         detection_type = None
 
@@ -473,6 +486,12 @@ def evaluate_rules(records, threshold=5, window_hours=1):
             capped_logs.append(e['raw'])
         capped_logs.reverse()
         alert['raw_logs'] = capped_logs
+
+        if orig_h in ip_to_mac:
+            mac = ip_to_mac[orig_h]
+            alert['dynamic_context'] = {'MAC Address': mac}
+            if mac in mac_to_hostname:
+                alert['dynamic_context']['Host Name'] = mac_to_hostname[mac]
 
         # ── Compute detection-type-specific metrics ──────────────────────
         if alert['detection_type'] == 'dns_anomaly' and orig_h in unique_domains:

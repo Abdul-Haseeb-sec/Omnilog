@@ -130,6 +130,14 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                     if not isinstance(ip_pkt, dpkt.ip.IP):
                         continue
 
+                    src_ip = socket.inet_ntoa(ip_pkt.src)
+                    
+                    if src_mac:
+                        out.write(json.dumps({
+                            "ts": ts, "intel_type": "host_profile",
+                            "ip": src_ip, "mac": src_mac
+                        }) + '\n')
+
                     # ── TCP ────────────────────────────────────────────────
                     if isinstance(ip_pkt.data, dpkt.tcp.TCP):
                         tcp = ip_pkt.data
@@ -187,6 +195,19 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                         "query": qname,
                                     }) + '\n')
                                     stats["dns_events"] += 1
+                            except Exception:
+                                pass
+                                
+                        elif udp.sport in (67, 68) or udp.dport in (67, 68):
+                            try:
+                                dhcp = dpkt.dhcp.DHCP(udp.data)
+                                for opt in dhcp.opts:
+                                    if opt[0] == 12: # Hostname
+                                        hostname = opt[1].decode('utf-8')
+                                        out.write(json.dumps({
+                                            "ts": ts, "intel_type": "host_profile",
+                                            "ip": src_ip, "mac": src_mac, "hostname": hostname
+                                        }) + '\n')
                             except Exception:
                                 pass
 
