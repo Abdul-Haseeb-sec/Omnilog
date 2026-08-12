@@ -71,9 +71,15 @@ cd dashboard && npm run dev
 
 ## Production Deployment
 
-For production deployments, you should use a production WSGI server like Gunicorn instead of the Flask development server. Ensure you have set the `API_KEY` in your `.env` file to protect the API endpoints.
+For production deployments, you should use Docker Compose to spin up the multi-container environment (Gunicorn API + Nginx static frontend). Ensure you have set the `API_KEY` in your `.env` file to protect the API endpoints.
 
-**Start the backend using Gunicorn:**
+**Start with Docker Compose:**
+```bash
+docker compose up -d --build
+```
+*The dashboard will be available at `http://localhost:5173` and the API at `http://localhost:5000`.*
+
+**Alternatively, start the backend manually using Gunicorn:**
 ```bash
 ./run_prod.sh
 ```
