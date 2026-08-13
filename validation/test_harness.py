@@ -630,7 +630,7 @@ def evaluate_rules(records, threshold=None, window_hours=1):
         # Apply rule-specific threshold if available and no override provided
         rule_threshold = threshold
         if rule_threshold is None:
-            rule_threshold = 5 # fallback
+            rule_threshold = 1 if dominant == 'privilege_escalation' else 5 # fallback
             for r in LOADED_RULES:
                 if r.type_name == dominant and r.threshold is not None:
                     rule_threshold = r.threshold
@@ -709,6 +709,10 @@ def evaluate_rules(records, threshold=None, window_hours=1):
             }
 
     # ── Post-loop: generate alerts for new detection types ────────────────
+    # Note: The following three heuristics (Port Scan, Distributed SSH, 
+    # and Data Exfiltration) operate cumulatively over the full input span
+    # of the parsed dataset rather than a rolling time window. This is
+    # intentional to catch slow-burn activity that spans the entire capture.
 
     # Port scan: one IP probing many unique destination ports
     PORT_SCAN_THRESHOLD = 25

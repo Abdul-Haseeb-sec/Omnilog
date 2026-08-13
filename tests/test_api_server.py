@@ -169,6 +169,23 @@ class TestUpload:
         assert alerts[0]['source_ip'] == '2001:db8::1'
         assert alerts[0]['detection_type'] == 'ssh_brute_force'
 
+    def test_upload_rate_limit(self, client):
+        """Uploading more than 10 times per minute from same IP should return 429."""
+        from api_server import upload_rates
+        # Clear rate limit state before test
+        upload_rates.clear()
+        
+        for _ in range(10):
+            data = {'file': (io.BytesIO(b'{}'), 'test.json')}
+            res = client.post('/upload', data=data, content_type='multipart/form-data')
+            assert res.status_code in (200, 400) # Could be 400 because {} is not enough, but not 429
+            
+        # 11th request should be rate limited
+        data = {'file': (io.BytesIO(b'{}'), 'test.json')}
+        res = client.post('/upload', data=data, content_type='multipart/form-data')
+        assert res.status_code == 429
+        assert b'Rate limit exceeded' in res.data
+
 
 # ── Threat Intel Endpoints ─────────────────────────────────────────────────────
 

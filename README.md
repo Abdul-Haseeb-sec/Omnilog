@@ -145,7 +145,7 @@ This tool is designed for **localhost use only** by default.
 | Data Exfiltration | T1041 | Built-in (Large Outbound Volume) |
 | Privilege Escalation | T1068 / T1078 | Built-in (syslog sudo/su, Windows 4672/4732) |
 
-> **Sigma integration:** Detection rules in `detections/` are loaded and evaluated at runtime via a custom YAML rule engine. Add new `.yml` rules to the `detections/` directory and they will be automatically picked up on the next analysis run.
+> **Sigma integration:** SSH brute-force is Sigma/YAML-rule-driven (`detections/brute_force.yml`). DNS anomaly and HTTP error detection use built-in heuristics (not yet YAML-configurable). Add new `.yml` rules to the `detections/` directory and they will be automatically picked up on the next analysis run.
 
 ## License
 

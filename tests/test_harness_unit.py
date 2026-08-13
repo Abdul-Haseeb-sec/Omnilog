@@ -301,6 +301,11 @@ correlation:
         alerts = evaluate_rules(events)
         assert any(a['detection_type'] == 'port_scan' and a['source_ip'] == '10.0.0.9' for a in alerts)
 
+    def test_ipv6_port_scan_detection(self):
+        events = [{'ts': str(1000 + i), 'id.orig_h': '2001:db8::1', 'id.resp_p': str(i), 'pcap_event': 'syn'} for i in range(30)]
+        alerts = evaluate_rules(events)
+        assert any(a['detection_type'] == 'port_scan' and a['source_ip'] == '2001:db8::1' for a in alerts)
+
     def test_distributed_ssh_detection(self):
         events = [{'ts': str(1000 + i), 'id.orig_h': f'10.0.0.{i}', 'id.resp_h': '192.168.1.5', 'auth_success': False} for i in range(5)]
         alerts = evaluate_rules(events)
@@ -312,8 +317,8 @@ correlation:
         assert any(a['detection_type'] == 'data_exfiltration' and a['source_ip'] == '10.0.0.10' for a in alerts)
 
     def test_privilege_escalation_detection(self):
-        events = [{'ts': str(1000 + i), 'id.orig_h': 'user1', 'event_type': 'privilege_escalation'} for i in range(5)]
-        alerts = evaluate_rules(events)
+        events = [{'ts': str(1000 + i), 'id.orig_h': 'user1', 'event_type': 'privilege_escalation'} for i in range(1)]
+        alerts = evaluate_rules(events, threshold=None)
         assert any(a['detection_type'] == 'privilege_escalation' and a['source_ip'] == 'user1' for a in alerts)
 # ── Threat Intel Tests ─────────────────────────────────────────────────────────
 

@@ -11,4 +11,5 @@ SERVER_PORT=${PORT:-${API_PORT:-5000}}
 WORKERS=${GUNICORN_WORKERS:-4}
 
 echo "Starting OmniLog API Server (Production) on 0.0.0.0:$SERVER_PORT with $WORKERS workers..."
+export OMNILOG_PROD=1
 exec gunicorn --workers $WORKERS --bind 0.0.0.0:$SERVER_PORT api_server:app

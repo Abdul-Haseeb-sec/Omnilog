@@ -15,6 +15,8 @@ import logging
 import tempfile
 import ipaddress
 import subprocess
+from collections import deque
+import time
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -56,7 +58,13 @@ CORS(app, origins=ALLOWED_ORIGINS)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 if not API_KEY:
-    log.warning("running without auth — do not expose this port. Set API_KEY to enable authentication.")
+    if os.environ.get('OMNILOG_PROD'):
+        log.error("=========================================================================")
+        log.error("PRODUCTION SERVER STARTED WITH NO AUTHENTICATION!")
+        log.error("Set API_KEY before exposing this port, or your server will be wide open.")
+        log.error("=========================================================================")
+    else:
+        log.warning("running without auth — do not expose this port. Set API_KEY to enable authentication.")
 
 @app.before_request
 def require_api_key():
@@ -248,11 +256,31 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
     return stats
 
 
+# ── Rate Limiting ──────────────────────────────────────────────────────────────
+
+upload_rates = {}
+
+def is_rate_limited(ip, limit=10, window=60):
+    now = time.time()
+    if ip not in upload_rates:
+        upload_rates[ip] = deque(maxlen=limit)
+    while upload_rates[ip] and upload_rates[ip][0] < now - window:
+        upload_rates[ip].popleft()
+    if len(upload_rates[ip]) >= limit:
+        return True
+    upload_rates[ip].append(now)
+    return False
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Accept a log/pcap file, run the harness, return a per-request report."""
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    if is_rate_limited(client_ip):
+        return jsonify({'error': 'Rate limit exceeded (10 uploads per minute)'}), 429
+
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
 
