@@ -73,5 +73,5 @@ jobs:
         with:
           app-name: 'omnilog'
           slot-name: 'Production'
-          
- 
+          package: .
+          startup-command: 'gunicorn --workers 4 --timeout 300 --bind 0.0.0.0:8000 api_server:app'
