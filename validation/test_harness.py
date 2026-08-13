@@ -497,6 +497,15 @@ def evaluate_rules(records, threshold=None, window_hours=1):
     http_arrival_times = collections.defaultdict(list)
     mac_to_hostname = {}
     ip_to_mac = {}
+    
+    # Trackers for thread intelligence enrichment
+    ip_to_hostname_direct = collections.defaultdict(set)
+    ip_to_windows_user = collections.defaultdict(set)
+    ip_to_full_name = collections.defaultdict(set)
+    ip_to_username = collections.defaultdict(set)
+    ip_to_malware = collections.defaultdict(set)
+    ip_to_c2_port = collections.defaultdict(set)
+    ip_to_c2_ip = collections.defaultdict(set)
 
     # ── Pre-filter trackers (run on ALL records, not just errors) ───────────
     port_diversity = collections.defaultdict(set)
@@ -550,6 +559,17 @@ def evaluate_rules(records, threshold=None, window_hours=1):
                     except (ValueError, TypeError):
                         pass
 
+            # Dynamically extract thread intel context from ALL records
+            if record.get('windows_user_account'): ip_to_windows_user[orig_h].add(str(record['windows_user_account']))
+            if record.get('full_user_name'): ip_to_full_name[orig_h].add(str(record['full_user_name']))
+            if record.get('username'): ip_to_username[orig_h].add(str(record['username']))
+            if record.get('hostname'): ip_to_hostname_direct[orig_h].add(str(record['hostname']))
+            
+            if record.get('pcap_event') == 'malware_beacon' or record.get('malware_name'):
+                if record.get('malware_name'): ip_to_malware[orig_h].add(str(record['malware_name']))
+                if record.get('id.resp_p'): ip_to_c2_port[orig_h].add(str(record['id.resp_p']))
+                if record.get('id.resp_h'): ip_to_c2_ip[orig_h].add(str(record['id.resp_h']))
+                
         is_error = False
         detection_type = None
 
@@ -669,11 +689,48 @@ def evaluate_rules(records, threshold=None, window_hours=1):
         capped_logs.reverse()
         alert['raw_logs'] = capped_logs
 
+        alert['dynamic_context'] = {}
         if orig_h in ip_to_mac:
             mac = ip_to_mac[orig_h]
-            alert['dynamic_context'] = {'MAC Address': mac}
+            alert['dynamic_context']['MAC Address'] = mac
             if mac in mac_to_hostname:
                 alert['dynamic_context']['Host Name'] = mac_to_hostname[mac]
+
+        if orig_h in ip_to_hostname_direct:
+            h_names = list(ip_to_hostname_direct[orig_h])
+            if 'Host Name' not in alert['dynamic_context']:
+                alert['dynamic_context']['Host Name'] = ", ".join(h_names)
+                
+        if orig_h in ip_to_windows_user:
+            alert['dynamic_context']['Windows User Account'] = ", ".join(list(ip_to_windows_user[orig_h]))
+            
+        if orig_h in ip_to_full_name:
+            alert['dynamic_context']['Full Name'] = ", ".join(list(ip_to_full_name[orig_h]))
+            
+        if orig_h in ip_to_username and 'Windows User Account' not in alert['dynamic_context']:
+            alert['dynamic_context']['Windows User Account'] = ", ".join(list(ip_to_username[orig_h]))
+
+        if orig_h in ip_to_malware:
+            alert['dynamic_context']['Malware'] = ", ".join(list(ip_to_malware[orig_h]))
+            
+        if orig_h in ip_to_c2_port:
+            alert['dynamic_context']['C2 Port'] = ", ".join(list(ip_to_c2_port[orig_h]))
+            
+        if orig_h in ip_to_c2_ip:
+            alert['dynamic_context']['C2 IP'] = ", ".join(list(ip_to_c2_ip[orig_h]))
+            
+        date_str = alert['window_start'][:10]
+        h_name = alert['dynamic_context'].get('Host Name', '')
+        uname = alert['dynamic_context'].get('Windows User Account', '')
+        if not uname:
+            uname = alert['dynamic_context'].get('Full Name', '')
+        malware = alert['dynamic_context'].get('Malware', '')
+        
+        host_clause = f" ({h_name})" if h_name else ""
+        user_clause = f" used by {uname}" if uname else ""
+        action_clause = f"infected with {malware}" if malware else "flagged for suspicious activity"
+        
+        alert['dynamic_context']['Executive Summary'] = f"On {date_str}, a Windows host{host_clause} at {orig_h}{user_clause} was {action_clause}."
 
         # ── Compute detection-type-specific metrics ──────────────────────
         if alert['detection_type'] == 'dns_anomaly' and orig_h in unique_domains:

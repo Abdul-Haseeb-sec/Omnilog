@@ -164,12 +164,57 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                     else:
                         continue
 
+                    # ── Deep Payload Extraction (NTLM / Kerberos / LDAP) ────────
+                    win_user = None
+                    win_hostname = None
+                    
+                    def check_payload_for_intel(payload):
+                        nonlocal win_user, win_hostname
+                        if not payload: return
+                        # NTLMSSP Extraction
+                        idx = payload.find(b'NTLMSSP\x00')
+                        if idx != -1 and len(payload) >= idx + 52:
+                            ntlm = payload[idx:]
+                            msg_type = struct.unpack('<I', ntlm[8:12])[0]
+                            if msg_type == 3: # Authenticate Message
+                                try:
+                                    def get_str(offset_base):
+                                        if offset_base + 8 > len(ntlm): return None
+                                        l, ml, o = struct.unpack('<HHI', ntlm[offset_base:offset_base+8])
+                                        if o + l > len(ntlm): return None
+                                        return ntlm[o:o+l].decode('utf-16le', errors='ignore')
+                                    u = get_str(36)
+                                    h = get_str(44)
+                                    if u and len(u) > 1: win_user = u
+                                    if h and len(h) > 1: win_hostname = h
+                                except Exception:
+                                    pass
+                        
+                        # Very naive Kerberos AS-REQ / LDAP plain-text string hunting
+                        try:
+                            s = payload.decode('ascii', errors='ignore')
+                            import re
+                            # LDAP displayName / sAMAccountName heuristics
+                            if 'displayName' in s or 'sAMAccountName' in s:
+                                m = re.search(r'sAMAccountName\x31[\x00-\xFF]{2}\x04[\x00-\xFF]([a-zA-Z0-9_\-]+)', s)
+                                if m: win_user = m.group(1)
+                                m2 = re.search(r'displayName\x31[\x00-\xFF]{2}\x04[\x00-\xFF]([a-zA-Z0-9_\-\s]+)', s)
+                                if m2: win_user = m2.group(1) # fallback or use as full name
+                        except Exception:
+                            pass
 
-                    if src_mac:
-                        out.write(json.dumps({
+                    if isinstance(ip_pkt.data, dpkt.tcp.TCP) or isinstance(ip_pkt.data, dpkt.udp.UDP):
+                        check_payload_for_intel(ip_pkt.data.data)
+
+                    if src_mac or win_user or win_hostname:
+                        intel_rec = {
                             "ts": ts, "intel_type": "host_profile",
-                            "ip": src_ip, "mac": src_mac
-                        }) + '\n')
+                            "ip": src_ip
+                        }
+                        if src_mac: intel_rec["mac"] = src_mac
+                        if win_user: intel_rec["windows_user_account"] = win_user
+                        if win_hostname: intel_rec["hostname"] = win_hostname
+                        out.write(json.dumps(intel_rec) + '\n')
 
                     # ── TCP ────────────────────────────────────────────────
                     if isinstance(ip_pkt.data, dpkt.tcp.TCP):
@@ -186,9 +231,44 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                             out.write(json.dumps(rec) + '\n')
                             stats["tcp_connections"] += 1
 
-                        # Track TCP payload bytes for data exfil detection
+                        # Track TCP payload bytes for data exfil detection and Malware/LDAP
                         elif tcp.data and len(tcp.data) > 0:
                             payload_len = len(tcp.data)
+                            
+                            import re
+                            # 1. LDAP (port 389) Username Extraction
+                            if tcp.dport == 389 or tcp.sport == 389:
+                                try:
+                                    s = tcp.data.decode('ascii', errors='ignore')
+                                    m = re.search(r'CN=([^,]+),CN=Users', s)
+                                    if m:
+                                        extracted_user = m.group(1)
+                                        ldap_rec = {
+                                            "ts": ts, "intel_type": "host_profile",
+                                            "ip": src_ip, "username": extracted_user
+                                        }
+                                        if src_mac: ldap_rec["mac"] = src_mac
+                                        out.write(json.dumps(ldap_rec) + '\n')
+                                except Exception:
+                                    pass
+
+                            # 2. Malware Signatures Check
+                            MALWARE_SIGNATURES = {
+                                re.compile(rb'STRRAT'): 'STRRAT',
+                            }
+                            malware_name = None
+                            for sig, name in MALWARE_SIGNATURES.items():
+                                if sig.search(tcp.data):
+                                    malware_name = name
+                                    break
+                            
+                            if malware_name:
+                                out.write(json.dumps({
+                                    "ts": ts, "id.orig_h": src_ip, "id.resp_h": dst_ip,
+                                    "id.resp_p": tcp.dport, "proto": "tcp",
+                                    "pcap_event": "malware_beacon", "malware_name": malware_name
+                                }) + '\n')
+
                             # Only emit for non-trivial payloads (>100 bytes) to avoid flooding
                             if payload_len > 100:
                                 out.write(json.dumps({

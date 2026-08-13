@@ -255,11 +255,22 @@ function App() {
                 </div>
               </div>
 
-              {selectedAlert.intel_details && Object.keys(selectedAlert.intel_details).length > 0 && (
+              {selectedAlert.intel_details && selectedAlert.intel_details["Executive Summary"] && (
+                <div className="detail-section">
+                  <div className="detail-section-title">Executive Summary</div>
+                  <p style={{ lineHeight: 1.5, color: '#e2e8f0', margin: '8px 0' }}>
+                    {selectedAlert.intel_details["Executive Summary"]}
+                  </p>
+                </div>
+              )}
+
+              {selectedAlert.intel_details && Object.keys(selectedAlert.intel_details).filter(k => k !== 'Executive Summary').length > 0 && (
                 <div className="detail-section">
                   <div className="detail-section-title">Threat Intelligence</div>
                   <div className="detail-grid">
-                    {Object.entries(selectedAlert.intel_details).map(([k, v]) => (
+                    {Object.entries(selectedAlert.intel_details)
+                      .filter(([k]) => k !== 'Executive Summary')
+                      .map(([k, v]) => (
                       <div className="detail-item" key={k}>
                         <span className="detail-label">{k.replace(/_/g, ' ')}</span>
                         <span className="detail-value">{String(v)}</span>
