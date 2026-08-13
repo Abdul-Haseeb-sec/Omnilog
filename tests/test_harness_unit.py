@@ -259,6 +259,26 @@ class TestEvaluateRules:
         assert alerts[0]['dynamic_context']['MAC Address'] == 'aa:bb:cc:dd:ee:ff'
         assert alerts[0]['dynamic_context']['Host Name'] == 'test-win-pc'
 
+    def test_host_profile_enrichment_extended(self):
+        """Extended intel fields like full name, username, malware, and C2 should populate."""
+        events = [
+            {'intel_type': 'host_profile', 'ip': '9.9.9.10', 'mac': 'aa:bb:cc:dd:ee:11', 'hostname': 'test-host', 'username': 'jdoe', 'full_user_name': 'John Doe'},
+            {'ts': '1000', 'id.orig_h': '9.9.9.10', 'id.resp_h': '8.8.8.8', 'id.resp_p': '1234', 'pcap_event': 'malware_beacon', 'malware_name': 'STRRAT'},
+        ] + self._make_ssh_events('9.9.9.10', 15)
+        alerts = evaluate_rules(iter(events), threshold=15, window_hours=1)
+        assert len(alerts) == 1
+        ctx = alerts[0]['dynamic_context']
+        assert ctx['Host Name'] == 'test-host'
+        assert ctx['Windows User Account'] == 'jdoe'
+        assert ctx['Full Name'] == 'John Doe'
+        assert ctx['Malware'] == 'STRRAT'
+        assert ctx['C2 IP'] == '8.8.8.8'
+        assert ctx['C2 Port'] == '1234'
+        assert 'Executive Summary' in ctx
+        assert 'John Doe' in ctx['Executive Summary'] or 'jdoe' in ctx['Executive Summary']
+        assert 'STRRAT' in ctx['Executive Summary']
+        assert 'test-host' in ctx['Executive Summary']
+
     def test_dynamic_sigma_rule(self):
         """A new YAML rule should be loaded and evaluated automatically."""
         import tempfile

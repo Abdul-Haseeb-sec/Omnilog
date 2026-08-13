@@ -230,6 +230,10 @@ def _parse_windows_xml(filepath, counts=None):
         # 4625 = Failed logon, 4771 = Kerberos pre-auth failed
         if eid in ('4625', '4771'):
             rec['auth_success'] = False
+            tu = fields.get('TargetUserName')
+            ws = fields.get('WorkstationName')
+            if tu: rec['username'] = tu
+            if ws: rec['hostname'] = ws
             if ip:
                 rec['id.orig_h'] = ip
                 if counts is not None: counts[1] += 1
@@ -237,6 +241,10 @@ def _parse_windows_xml(filepath, counts=None):
         # 4624 = Successful logon
         elif eid == '4624':
             rec['auth_success'] = True
+            tu = fields.get('TargetUserName')
+            ws = fields.get('WorkstationName')
+            if tu: rec['username'] = tu
+            if ws: rec['hostname'] = ws
             if ip:
                 rec['id.orig_h'] = ip
                 if counts is not None: counts[1] += 1
@@ -323,13 +331,31 @@ ZEEK_SSH_FIELDS = ["ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_
 ZEEK_DNS_FIELDS = ["ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p", "proto", "trans_id", "query", "qclass", "qclass_name", "qtype", "qtype_name", "rcode", "rcode_name", "AA", "TC", "RD", "RA", "Z", "answers", "TTLs", "rejected"]
 ZEEK_HTTP_FIELDS = ["ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p", "trans_depth", "method", "host", "uri", "referrer", "version", "user_agent", "request_body_len", "response_body_len", "status_code", "status_msg", "info_code", "info_msg", "tags", "username", "password", "proxied", "orig_fuids", "orig_filenames", "orig_mime_types", "resp_fuids", "resp_filenames", "resp_mime_types"]
 
+def _normalize_generic(rec):
+    if not isinstance(rec, dict): return rec
+    # Normalize recognizable fields into canonical keys
+    if 'user' in rec and not rec.get('windows_user_account'): rec['windows_user_account'] = rec['user']
+    if 'username' in rec and not rec.get('windows_user_account'): rec['windows_user_account'] = rec['username']
+    if 'host' in rec and not rec.get('hostname'): rec['hostname'] = rec['host']
+    if 'workstation' in rec and not rec.get('hostname'): rec['hostname'] = rec['workstation']
+    if 'dest_port' in rec and not rec.get('id.resp_p'): rec['id.resp_p'] = rec['dest_port']
+    if 'malware' in rec and not rec.get('malware_name'): rec['malware_name'] = rec['malware']
+    return rec
+
 def parse_log(log_path):
     """Auto-detect format and yield normalized records."""
+    import gzip
     counts = [0, 0]
     fmt = "Unknown"
+    
+    def _open_file(path, mode='r', **kwargs):
+        if path.endswith('.gz'):
+            return gzip.open(path, mode + 't' if 'b' not in mode else mode, **kwargs)
+        return open(path, mode, **kwargs)
+
     try:
         # Binary/XML check: read first bytes
-        with open(log_path, 'rb') as bf:
+        with _open_file(log_path, 'rb') as bf:
             head = bf.read(512).lstrip()
 
         # ── XML (Windows Event Log exports) ────────────────────────
@@ -342,7 +368,7 @@ def parse_log(log_path):
                 log.warning(f"0 usable records extracted from {fmt} format — check schema compatibility")
             return
 
-        with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+        with _open_file(log_path, 'r', encoding='utf-8', errors='ignore') as f:
             first_line = f.readline().strip()
             f.seek(0)
 
@@ -362,7 +388,7 @@ def parse_log(log_path):
                     elif not row[0].startswith('#'):
                         if fields:
                             counts[1] += 1
-                            yield dict(zip(fields, row))
+                            yield _normalize_generic(dict(zip(fields, row)))
                         else:
                             rl = len(row)
                             fname = os.path.basename(log_path).lower() if log_path else ""
@@ -377,9 +403,9 @@ def parse_log(log_path):
                             
                             if schema:
                                 counts[1] += 1
-                                yield dict(zip(schema, row))
+                                yield _normalize_generic(dict(zip(schema, row)))
                             elif not warned_unrecognized:
-                                log.warning(f"Headerless Zeek log with unrecognized column count ({rl}) — cannot map fields reliably. Supported: ssh.log (18 cols), dns.log (23 cols), http.log (27 cols). Consider exporting with a #fields header or enabling json-logs.zeek.")
+                                log.warning(f"Headerless Zeek log with unrecognized column count ({rl})")
                                 warned_unrecognized = True
 
             # ── Syslog / auth.log ──────────────────────────────────
@@ -396,7 +422,7 @@ def parse_log(log_path):
                 for row in reader:
                     counts[0] += 1
                     counts[1] += 1
-                    yield row
+                    yield _normalize_generic(row)
 
             # ── JSON Lines (Zeek JSON / Suricata / PCAP extract) ──
             else:
@@ -417,7 +443,7 @@ def parse_log(log_path):
                             if 'event_type' in item and 'id.orig_h' not in item:
                                 item = _normalize_suricata(item)
                             counts[1] += 1
-                            yield item
+                            yield _normalize_generic(item)
                         full_parsed = True
                 except json.JSONDecodeError:
                     pass
@@ -434,7 +460,7 @@ def parse_log(log_path):
                             if 'event_type' in record and 'id.orig_h' not in record:
                                 record = _normalize_suricata(record)
                             counts[1] += 1
-                            yield record
+                            yield _normalize_generic(record)
                         except json.JSONDecodeError:
                             continue
 
@@ -525,6 +551,12 @@ def evaluate_rules(records, threshold=None, window_hours=1):
                 mac_to_hostname[mac] = hostname
             if ip and mac and ip != '0.0.0.0':
                 ip_to_mac[ip] = mac
+                
+            if ip:
+                if record.get('windows_user_account'): ip_to_windows_user[ip].add(str(record['windows_user_account']))
+                if record.get('full_user_name'): ip_to_full_name[ip].add(str(record['full_user_name']))
+                if record.get('username'): ip_to_username[ip].add(str(record['username']))
+                if record.get('hostname'): ip_to_hostname_direct[ip].add(str(record['hostname']))
             continue
 
         # Extract common fields early for pre-filter tracking
@@ -719,18 +751,36 @@ def evaluate_rules(records, threshold=None, window_hours=1):
         if orig_h in ip_to_c2_ip:
             alert['dynamic_context']['C2 IP'] = ", ".join(list(ip_to_c2_ip[orig_h]))
             
-        date_str = alert['window_start'][:10]
+        # "On {weekday}, {date_str} at approximately {hh:mm} UTC, a Windows host{host_clause} at {orig_h}{user_clause} was {action_clause}."
+        # If a C2 port/IP is known, optionally append a clause like `f" (C2: {c2_ip}:{c2_port})"`
+        
+        try:
+            dt_obj = datetime.fromisoformat(alert['window_start'])
+            weekday = dt_obj.strftime("%A")
+            date_str = dt_obj.strftime("%Y-%m-%d")
+            hh_mm = dt_obj.strftime("%H:%M")
+        except Exception:
+            weekday = "Unknown"
+            date_str = alert['window_start'][:10]
+            hh_mm = "00:00"
+
         h_name = alert['dynamic_context'].get('Host Name', '')
         uname = alert['dynamic_context'].get('Windows User Account', '')
         if not uname:
             uname = alert['dynamic_context'].get('Full Name', '')
         malware = alert['dynamic_context'].get('Malware', '')
+        c2_port = alert['dynamic_context'].get('C2 Port', '')
+        c2_ip = alert['dynamic_context'].get('C2 IP', '')
         
         host_clause = f" ({h_name})" if h_name else ""
         user_clause = f" used by {uname}" if uname else ""
         action_clause = f"infected with {malware}" if malware else "flagged for suspicious activity"
         
-        alert['dynamic_context']['Executive Summary'] = f"On {date_str}, a Windows host{host_clause} at {orig_h}{user_clause} was {action_clause}."
+        c2_clause = ""
+        if c2_ip or c2_port:
+            c2_clause = f" (C2: {c2_ip if c2_ip else 'unknown'}:{c2_port if c2_port else 'unknown'})"
+            
+        alert['dynamic_context']['Executive Summary'] = f"On {weekday}, {date_str} at approximately {hh_mm} UTC, a Windows host{host_clause} at {orig_h}{user_clause} was {action_clause}.{c2_clause}"
 
         # ── Compute detection-type-specific metrics ──────────────────────
         if alert['detection_type'] == 'dns_anomaly' and orig_h in unique_domains:

@@ -194,12 +194,17 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                         try:
                             s = payload.decode('ascii', errors='ignore')
                             import re
-                            # LDAP displayName / sAMAccountName heuristics
-                            if 'displayName' in s or 'sAMAccountName' in s:
-                                m = re.search(r'sAMAccountName\x31[\x00-\xFF]{2}\x04[\x00-\xFF]([a-zA-Z0-9_\-]+)', s)
-                                if m: win_user = m.group(1)
-                                m2 = re.search(r'displayName\x31[\x00-\xFF]{2}\x04[\x00-\xFF]([a-zA-Z0-9_\-\s]+)', s)
-                                if m2: win_user = m2.group(1) # fallback or use as full name
+                            # LDAP displayName / sAMAccountName / CN heuristics
+                            m_cn = re.search(r'CN=([^,]+),CN=Users', s)
+                            if m_cn:
+                                # This is usually a Display Name or Full Name in AD
+                                intel_rec = {"ts": ts, "intel_type": "host_profile", "ip": src_ip}
+                                intel_rec["full_user_name"] = m_cn.group(1)
+                                if src_mac: intel_rec["mac"] = src_mac
+                                out.write(json.dumps(intel_rec) + '\n')
+                                
+                            m_sam = re.search(r'sAMAccountName\x31[\x00-\xFF]{2}\x04[\x00-\xFF]([a-zA-Z0-9_\-]+)', s)
+                            if m_sam: win_user = m_sam.group(1)
                         except Exception:
                             pass
 
@@ -231,28 +236,46 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                             out.write(json.dumps(rec) + '\n')
                             stats["tcp_connections"] += 1
 
+                        # HTTP response parsing (ports 80/8080/8000)
+                        elif tcp.sport in (80, 8080, 8000) and tcp.data and tcp.data[:4] == b'HTTP':
+                            try:
+                                resp = dpkt.http.Response(tcp.data)
+                                out.write(json.dumps({
+                                    "ts": ts, "id.orig_h": dst_ip,
+                                    "id.resp_h": src_ip, "id.resp_p": tcp.sport,
+                                    "proto": "tcp", "service": "http",
+                                    "status_code": resp.status,
+                                }) + '\n')
+                                stats["http_events"] += 1
+                            except Exception:
+                                pass
+
                         # Track TCP payload bytes for data exfil detection and Malware/LDAP
                         elif tcp.data and len(tcp.data) > 0:
                             payload_len = len(tcp.data)
                             
                             import re
-                            # 1. LDAP (port 389) Username Extraction
-                            if tcp.dport == 389 or tcp.sport == 389:
+                            
+                            # Malware Signatures Check
+                            def _parse_pipe_beacon(payload):
                                 try:
-                                    s = tcp.data.decode('ascii', errors='ignore')
-                                    m = re.search(r'CN=([^,]+),CN=Users', s)
-                                    if m:
-                                        extracted_user = m.group(1)
-                                        ldap_rec = {
-                                            "ts": ts, "intel_type": "host_profile",
-                                            "ip": src_ip, "username": extracted_user
-                                        }
-                                        if src_mac: ldap_rec["mac"] = src_mac
-                                        out.write(json.dumps(ldap_rec) + '\n')
+                                    s = payload.decode('ascii', errors='ignore')
+                                    parts = s.split('|')
+                                    if len(parts) >= 13 and parts[1] == 'STRRAT':
+                                        res = {}
+                                        if parts[3]: res['hostname'] = parts[3]
+                                        if parts[4]: res['windows_user_account'] = parts[4]
+                                        if parts[5]: res['os'] = parts[5]
+                                        if parts[2]: res['malware_build_id'] = parts[2]
+                                        return res
                                 except Exception:
                                     pass
+                                return {}
 
-                            # 2. Malware Signatures Check
+                            BEACON_FIELD_PARSERS = {
+                                'STRRAT': lambda payload: _parse_pipe_beacon(payload),
+                            }
+                            
                             MALWARE_SIGNATURES = {
                                 re.compile(rb'STRRAT'): 'STRRAT',
                             }
@@ -263,11 +286,15 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                     break
                             
                             if malware_name:
-                                out.write(json.dumps({
+                                m_rec = {
                                     "ts": ts, "id.orig_h": src_ip, "id.resp_h": dst_ip,
                                     "id.resp_p": tcp.dport, "proto": "tcp",
                                     "pcap_event": "malware_beacon", "malware_name": malware_name
-                                }) + '\n')
+                                }
+                                if malware_name in BEACON_FIELD_PARSERS:
+                                    extra = BEACON_FIELD_PARSERS[malware_name](tcp.data)
+                                    m_rec.update(extra)
+                                out.write(json.dumps(m_rec) + '\n')
 
                             # Only emit for non-trivial payloads (>100 bytes) to avoid flooding
                             if payload_len > 100:
@@ -277,21 +304,6 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                     "pcap_event": "data", "payload_bytes": payload_len,
                                 }) + '\n')
                                 stats["tcp_bytes_tracked"] += payload_len
-
-                        # HTTP response parsing (ports 80/8080/8000)
-                        elif tcp.sport in (80, 8080, 8000) and tcp.data:
-                            try:
-                                if tcp.data[:4] == b'HTTP':
-                                    resp = dpkt.http.Response(tcp.data)
-                                    out.write(json.dumps({
-                                        "ts": ts, "id.orig_h": dst_ip,
-                                        "id.resp_h": src_ip, "id.resp_p": tcp.sport,
-                                        "proto": "tcp", "service": "http",
-                                        "status_code": resp.status,
-                                    }) + '\n')
-                                    stats["http_events"] += 1
-                            except Exception:
-                                pass
 
                     # ── UDP / DNS ──────────────────────────────────────────
                     elif isinstance(ip_pkt.data, dpkt.udp.UDP):
