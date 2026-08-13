@@ -327,6 +327,7 @@ correlation:
         import json
         import os
         import tempfile
+        import sys
         
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.jsonl') as f:
             f.write(json.dumps({'ts': '1000', 'id.orig_h': 'user1', 'event_type': 'privilege_escalation'}) + '\n')
@@ -334,7 +335,7 @@ correlation:
             
         out_path = log_path + '.out.json'
         try:
-            cmd = ['python', 'validation/test_harness.py', '--zeek-log', log_path, '--output', out_path]
+            cmd = [sys.executable, 'validation/test_harness.py', '--zeek-log', log_path, '--output', out_path]
             subprocess.run(cmd, check=True, capture_output=True)
             with open(out_path, 'r') as f:
                 report = json.load(f)
