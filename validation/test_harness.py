@@ -1000,7 +1000,7 @@ def main():
     parser = argparse.ArgumentParser(description="OmniLog Detection Harness")
     parser.add_argument("--zeek-log", required=True, help="Path to log file (any supported format)")
     parser.add_argument("--ground-truth", help="Path to attack_ground_truth.jsonl")
-    parser.add_argument("--threshold", type=int, default=5, help="Event count threshold")
+    parser.add_argument("--threshold", type=int, default=None, help="Event count threshold")
     parser.add_argument("--output", default="validation_report.json", help="Report output path")
     args = parser.parse_args()
 
@@ -1015,7 +1015,7 @@ def main():
         "mode": mode,
         "rule_id": "generic-anomaly-001",
         "rule_name": "High Volume Anomalies (SSH / DNS / HTTP)",
-        "threshold": args.threshold,
+        "threshold": args.threshold if args.threshold is not None else "auto",
         "alerts": [],
     }
 
