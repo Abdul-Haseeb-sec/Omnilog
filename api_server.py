@@ -277,7 +277,10 @@ def is_rate_limited(ip, limit=10, window=60):
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Accept a log/pcap file, run the harness, return a per-request report."""
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    client_ip = request.remote_addr
+    if os.environ.get('TRUST_PROXY_HEADERS') == '1':
+        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    
     if is_rate_limited(client_ip):
         return jsonify({'error': 'Rate limit exceeded (10 uploads per minute)'}), 429
 

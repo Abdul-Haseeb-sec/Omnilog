@@ -186,6 +186,26 @@ class TestUpload:
         assert res.status_code == 429
         assert b'Rate limit exceeded' in res.data
 
+    def test_upload_rate_limit_spoof_ip(self, client):
+        """Spoofed X-Forwarded-For should not bypass rate limit if TRUST_PROXY_HEADERS!=1."""
+        from api_server import upload_rates
+        upload_rates.clear()
+        
+        # Make 10 requests, changing the X-Forwarded-For each time
+        for i in range(10):
+            data = {'file': (io.BytesIO(b'{}'), 'test.json')}
+            headers = {'X-Forwarded-For': f'10.0.0.{i}'}
+            res = client.post('/upload', data=data, content_type='multipart/form-data', headers=headers)
+            assert res.status_code in (200, 400)
+            
+        # 11th request with yet another spoofed IP
+        data = {'file': (io.BytesIO(b'{}'), 'test.json')}
+        headers = {'X-Forwarded-For': '10.0.0.99'}
+        res = client.post('/upload', data=data, content_type='multipart/form-data', headers=headers)
+        
+        # It should still be rate limited because we track by remote_addr, not the spoofed header
+        assert res.status_code == 429
+
 
 # ── Threat Intel Endpoints ─────────────────────────────────────────────────────
 
