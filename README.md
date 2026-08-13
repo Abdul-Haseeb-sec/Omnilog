@@ -100,7 +100,7 @@ Upload `.pcap`, `.pcapng`, or `.cap` files directly from Wireshark, tcpdump, or 
 
 > **Note:** PCAP analysis is heuristic — SSH auth success/failure cannot be determined from encrypted packets. The engine counts connection attempts (SYN packets) to port 22 as potential auth failures. The dashboard displays a "⚠ PCAP heuristic" warning on these alerts.
 
-> **Supported linktypes:** Ethernet (`DLT_EN10MB`, e.g. `tcpdump -i eth0`), Linux cooked capture (`DLT_LINUX_SLL`, e.g. `tcpdump -i any`), and Raw IP (`DLT_RAW`). IPv6 packets are not currently parsed — only IPv4.
+> **Supported linktypes:** Ethernet (`DLT_EN10MB`, e.g. `tcpdump -i eth0`), Linux cooked capture (`DLT_LINUX_SLL`, e.g. `tcpdump -i any`), and Raw IP (`DLT_RAW`). Both IPv4 and IPv6 packets are parsed.
 
 ## Repository Structure
 
@@ -124,23 +124,28 @@ Upload `.pcap`, `.pcapng`, or `.cap` files directly from Wireshark, tcpdump, or 
 
 ## Security
 
-This tool is designed for **localhost use only**. It does not include authentication.
+This tool is designed for **localhost use only** by default.
 
-- CORS is locked to `localhost:5173` by default
+- API key authentication is supported (`API_KEY` in `.env`) and enforced on all protected routes
+- CORS is locked to `localhost:5173` by default (configurable via `CORS_ORIGINS`)
 - File uploads are sanitized (`secure_filename`) and size-capped
 - IP inputs are validated before storage
 - Temp files are cleaned up after every request
-- Do **not** expose this on a network without adding authentication first
+- For production deployment, **always** set an `API_KEY` in your `.env`
 
 ## Current Detections
 
 | Technique | MITRE ATT&CK | Detection Rule |
 |---|---|---|
-| Slow SSH Brute Force | T1110.001 | `detections/brute_force.yml` |
+| Slow SSH Brute Force | T1110.001 | `detections/brute_force.yml` / Built-in |
+| Distributed SSH Attack | T1110.003 | Built-in (Multi-Source Correlation) |
 | DNS Anomalies | T1071.004 | Built-in (NXDOMAIN/SERVFAIL) |
 | HTTP Scanning | T1190 | Built-in (4xx/5xx status codes) |
+| Port Scanning | T1046 | Built-in (Destination Port Diversity) |
+| Data Exfiltration | T1041 | Built-in (Large Outbound Volume) |
+| Privilege Escalation | T1068 / T1078 | Built-in (syslog sudo/su, Windows 4672/4732) |
 
-> **Sigma integration note:** `detections/brute_force.yml` documents the intended rule parameters. The current engine implements detection as a fixed Python heuristic — Sigma-driven evaluation (via pySigma) is on the roadmap.
+> **Sigma integration:** Detection rules in `detections/` are loaded and evaluated at runtime via a custom YAML rule engine. Add new `.yml` rules to the `detections/` directory and they will be automatically picked up on the next analysis run.
 
 ## License
 

@@ -143,6 +143,17 @@ class TestParseLog:
         assert records[0]['rcode_name'] == 'NXDOMAIN'
         assert records[0]['id.orig_h'] == '10.0.0.1'
 
+    def test_syslog_sudo(self):
+        content = "Jan  1 12:00:00 host1 sudo:   user1 : TTY=pts/0 ; PWD=/home/user1 ; USER=root ; COMMAND=/bin/bash\n"
+        path = _write_temp(content)
+        records = list(parse_log(path))
+        os.unlink(path)
+        assert len(records) == 1
+        assert records[0]['service'] == 'sudo'
+        assert records[0]['username'] == 'user1'
+        assert records[0]['target_user'] == 'root'
+        assert records[0]['event_type'] == 'privilege_escalation'
+
 
 # ── Cumulative Detection Tests ────────────────────────────────────────────────
 
@@ -285,7 +296,25 @@ correlation:
             os.remove(rule_path)
             load_yaml_rules() # reload to clean up
 
+    def test_port_scan_detection(self):
+        events = [{'ts': str(1000 + i), 'id.orig_h': '10.0.0.9', 'id.resp_p': str(i), 'pcap_event': 'syn'} for i in range(30)]
+        alerts = evaluate_rules(events)
+        assert any(a['detection_type'] == 'port_scan' and a['source_ip'] == '10.0.0.9' for a in alerts)
 
+    def test_distributed_ssh_detection(self):
+        events = [{'ts': str(1000 + i), 'id.orig_h': f'10.0.0.{i}', 'id.resp_h': '192.168.1.5', 'auth_success': False} for i in range(5)]
+        alerts = evaluate_rules(events)
+        assert any(a['detection_type'] == 'distributed_ssh_attack' and a['dest_ip'] == '192.168.1.5' for a in alerts)
+
+    def test_data_exfiltration_detection(self):
+        events = [{'ts': '1000', 'id.orig_h': '10.0.0.10', 'payload_bytes': 60 * 1024 * 1024}]
+        alerts = evaluate_rules(events)
+        assert any(a['detection_type'] == 'data_exfiltration' and a['source_ip'] == '10.0.0.10' for a in alerts)
+
+    def test_privilege_escalation_detection(self):
+        events = [{'ts': str(1000 + i), 'id.orig_h': 'user1', 'event_type': 'privilege_escalation'} for i in range(5)]
+        alerts = evaluate_rules(events)
+        assert any(a['detection_type'] == 'privilege_escalation' and a['source_ip'] == 'user1' for a in alerts)
 # ── Threat Intel Tests ─────────────────────────────────────────────────────────
 
 class TestEnrichIP:
@@ -328,7 +357,7 @@ class TestEnrichIP:
         cls, src, details = enrich_ip('10.0.0.5', alert, {}, {})
         assert cls == 'TRUE POSITIVE'
         assert 'Credential Spray' in src
-        assert 'distinct usernames' in details.get('reason', '')
+        assert 'diversity ratio' in details.get('reason', '')
 
     def test_ssh_scripted_attack_auto_tp(self):
         """Low-variance timing across many attempts → scripted attack → TRUE POSITIVE."""
@@ -376,12 +405,26 @@ class TestEnrichIP:
         assert 'App Retry' in src
 
     def test_http_moderate_stays_unknown(self):
-        """Moderate URI diversity → uncertain → stays UNKNOWN."""
+        """Moderate URI diversity ratio (e.g., 0.2) → uncertain → stays UNKNOWN."""
         alert = {
-            'event_count': 15,
+            'event_count': 25,
             'detection_type': 'http_error',
-            'metrics': {'uri_diversity': 10, 'timing_stddev': 5.0}
+            'metrics': {'uri_diversity': 5, 'timing_stddev': 5.0}
         }
+        cls, src, _ = enrich_ip('10.0.0.5', alert, {}, {})
+        assert cls == 'UNKNOWN'
+
+    def test_env_baseline_override(self):
+        """Test that a high environmental baseline overrides the static FP threshold."""
+        alert = {
+            'event_count': 40,
+            'detection_type': 'http_error',
+            'metrics': {'uri_diversity': 1, 'timing_stddev': 1.0},
+            'env_baseline': {'http_error_avg_count': 200}
+        }
+        # Normally 40 events with 1 URI would be App Retry (FP) because 40 > 30.
+        # But with env_avg=200, the threshold is max(30, 100) = 100.
+        # Since 40 < 100, it stays UNKNOWN.
         cls, src, _ = enrich_ip('10.0.0.5', alert, {}, {})
         assert cls == 'UNKNOWN'
 

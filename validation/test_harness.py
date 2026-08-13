@@ -112,6 +112,8 @@ load_yaml_rules()
 SYSLOG_TS = re.compile(r'^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+')
 SYSLOG_FAIL = re.compile(r'Failed (?:password|publickey) for (?:invalid user )?(\S+) from (\S+) port (\d+)')
 SYSLOG_OK = re.compile(r'Accepted (?:password|publickey) for (\S+) from (\S+) port (\d+)')
+SYSLOG_SUDO = re.compile(r'sudo:\s+(\S+)\s+:.*USER=(\S+)\s*;\s*COMMAND=(.*)')
+SYSLOG_SU_FAIL = re.compile(r'su(?:\[\d+\])?:.*(?:FAILED|authentication failure).*for\s+(\S+)', re.IGNORECASE)
 
 # Windows Event namespace
 WIN_NS = 'http://schemas.microsoft.com/win/2004/08/events/event'
@@ -152,7 +154,25 @@ def _parse_syslog(f, counts=None):
             if counts is not None: counts[1] += 1
             yield {'ts': str(ts), 'id.orig_h': ip, 'auth_success': True,
                    'username': user, 'service': 'ssh', 'hostname': hostname}
+            continue
 
+        sudo = SYSLOG_SUDO.search(line)
+        if sudo:
+            invoker, target_user, cmd = sudo.groups()
+            if counts is not None: counts[1] += 1
+            yield {'ts': str(ts), 'id.orig_h': hostname, 'service': 'sudo',
+                   'username': invoker, 'target_user': target_user,
+                   'command': cmd.strip(), 'hostname': hostname,
+                   'event_type': 'privilege_escalation'}
+            continue
+
+        su_fail = SYSLOG_SU_FAIL.search(line)
+        if su_fail:
+            target_user = su_fail.group(1)
+            if counts is not None: counts[1] += 1
+            yield {'ts': str(ts), 'id.orig_h': hostname, 'service': 'su',
+                   'auth_success': False, 'username': target_user,
+                   'hostname': hostname}
 
 def _parse_windows_xml(filepath, counts=None):
     """Parse Windows Event Log XML exports (Event Viewer → Save All Events As → XML)."""
@@ -221,9 +241,51 @@ def _parse_windows_xml(filepath, counts=None):
                 rec['id.orig_h'] = ip
                 if counts is not None: counts[1] += 1
                 yield rec
+        # 4648 = Explicit credential logon (pass-the-hash / runas)
+        elif eid == '4648':
+            rec['auth_success'] = True
+            rec['event_type'] = 'explicit_credential'
+            target = fields.get('TargetServerName', '')
+            if target:
+                rec['id.resp_h'] = target
+            if ip:
+                rec['id.orig_h'] = ip
+            elif fields.get('SubjectUserName'):
+                rec['id.orig_h'] = fields['SubjectUserName']
+            if rec.get('id.orig_h'):
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4720 = Account created (persistence)
+        elif eid == '4720':
+            rec['event_type'] = 'account_created'
+            rec['username'] = fields.get('TargetUserName', '')
+            rec['id.orig_h'] = fields.get('SubjectUserName', ip or hostname)
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4732 = User added to privileged group
+        elif eid == '4732':
+            rec['event_type'] = 'privilege_escalation'
+            rec['username'] = fields.get('MemberName', fields.get('MemberSid', ''))
+            rec['group'] = fields.get('TargetUserName', '')
+            rec['id.orig_h'] = fields.get('SubjectUserName', ip or hostname)
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4672 = Special privileges assigned to new logon
+        elif eid == '4672':
+            rec['event_type'] = 'privilege_escalation'
+            rec['username'] = fields.get('SubjectUserName', '')
+            if ip:
+                rec['id.orig_h'] = ip
+            elif rec['username']:
+                rec['id.orig_h'] = rec['username']
+            if rec.get('id.orig_h'):
+                if counts is not None: counts[1] += 1
+                yield rec
 
     if counts is not None and counts[0] > 0:
-        log.info(f"Parsed XML: {counts[0]} events found, {counts[1]} matched known auth EventIDs [4624/4625/4771] — if your export contains other event types, detection rules for those aren't implemented yet")
+        log.info(f"Parsed XML: {counts[0]} events found, {counts[1]} matched known EventIDs [4624/4625/4648/4672/4720/4732/4771]")
 
 
 def _normalize_suricata(rec):
@@ -436,6 +498,14 @@ def evaluate_rules(records, threshold=None, window_hours=1):
     mac_to_hostname = {}
     ip_to_mac = {}
 
+    # ── Pre-filter trackers (run on ALL records, not just errors) ───────────
+    port_diversity = collections.defaultdict(set)
+    port_scan_ts = {}
+    distributed_ssh = collections.defaultdict(set)
+    distributed_ssh_ts = {}
+    outbound_bytes = collections.defaultdict(int)
+    bytes_ts = {}
+
     for record in records:
         if record.get('intel_type') == 'host_profile':
             ip = record.get('ip')
@@ -447,7 +517,39 @@ def evaluate_rules(records, threshold=None, window_hours=1):
             if ip and mac and ip != '0.0.0.0':
                 ip_to_mac[ip] = mac
             continue
-            
+
+        # Extract common fields early for pre-filter tracking
+        ts_val = record.get('ts')
+        orig_h = record.get('id.orig_h') or record.get('id', {}).get('orig_h')
+        resp_h = record.get('id.resp_h', '')
+
+        # ── Pre-filter: track patterns across ALL records ──────────────────
+        if orig_h and ts_val:
+            try:
+                _tsf = float(ts_val)
+            except (ValueError, TypeError):
+                _tsf = None
+            if _tsf is not None:
+                if record.get('pcap_event') == 'syn':
+                    rp = record.get('id.resp_p')
+                    if rp is not None:
+                        try:
+                            port_diversity[orig_h].add(int(rp))
+                            port_scan_ts.setdefault(orig_h, [_tsf, _tsf])[1] = _tsf
+                        except (ValueError, TypeError):
+                            pass
+                auth = record.get('auth_success')
+                if resp_h and auth in (False, 'F', 'f', 'false'):
+                    distributed_ssh[resp_h].add(orig_h)
+                    distributed_ssh_ts.setdefault(resp_h, [_tsf, _tsf])[1] = _tsf
+                pb = record.get('payload_bytes')
+                if pb:
+                    try:
+                        outbound_bytes[orig_h] += int(pb)
+                        bytes_ts.setdefault(orig_h, [_tsf, _tsf])[1] = _tsf
+                    except (ValueError, TypeError):
+                        pass
+
         is_error = False
         detection_type = None
 
@@ -475,12 +577,13 @@ def evaluate_rules(records, threshold=None, window_hours=1):
             elif record.get('error') or record.get('failure'):
                 is_error = True
                 detection_type = 'generic_error'
+            elif record.get('event_type') == 'privilege_escalation':
+                is_error = True
+                detection_type = 'privilege_escalation'
 
         if not is_error:
             continue
 
-        ts_val = record.get('ts')
-        orig_h = record.get('id.orig_h') or record.get('id', {}).get('orig_h')
         if not ts_val or not orig_h:
             continue
 
@@ -605,6 +708,56 @@ def evaluate_rules(records, threshold=None, window_hours=1):
                 'timing_stddev': round(stddev, 2) if stddev is not None else None
             }
 
+    # ── Post-loop: generate alerts for new detection types ────────────────
+
+    # Port scan: one IP probing many unique destination ports
+    PORT_SCAN_THRESHOLD = 25
+    for ip, ports in port_diversity.items():
+        if len(ports) >= PORT_SCAN_THRESHOLD and ip not in alerted:
+            ts_r = port_scan_ts.get(ip, [0, 0])
+            alerts.append({
+                'source_ip': ip, 'dest_ip': '',
+                'window_start': datetime.fromtimestamp(ts_r[0], tz=timezone.utc).isoformat(),
+                'window_end': datetime.fromtimestamp(ts_r[1], tz=timezone.utc).isoformat(),
+                'event_count': len(ports),
+                'detection_type': 'port_scan',
+                'raw_logs': [],
+                'detection_confidence': 'Heuristic (PCAP)',
+                'metrics': {'unique_ports': len(ports), 'sample_ports': sorted(ports)[:25]},
+            })
+
+    # Distributed SSH: many source IPs attacking the same target
+    DISTRIBUTED_THRESHOLD = 3
+    for target, sources in distributed_ssh.items():
+        if len(sources) >= DISTRIBUTED_THRESHOLD:
+            ts_r = distributed_ssh_ts.get(target, [0, 0])
+            alerts.append({
+                'source_ip': sorted(sources)[0], 'dest_ip': target,
+                'window_start': datetime.fromtimestamp(ts_r[0], tz=timezone.utc).isoformat(),
+                'window_end': datetime.fromtimestamp(ts_r[1], tz=timezone.utc).isoformat(),
+                'event_count': len(sources),
+                'detection_type': 'distributed_ssh_attack',
+                'raw_logs': [],
+                'detection_confidence': 'Parsed Log',
+                'metrics': {'unique_source_ips': len(sources), 'source_ips': sorted(sources)[:25]},
+            })
+
+    # Data exfiltration: unusually large outbound data volume
+    EXFIL_THRESHOLD = 50 * 1024 * 1024  # 50 MB
+    for ip, total in outbound_bytes.items():
+        if total >= EXFIL_THRESHOLD:
+            ts_r = bytes_ts.get(ip, [0, 0])
+            alerts.append({
+                'source_ip': ip, 'dest_ip': '',
+                'window_start': datetime.fromtimestamp(ts_r[0], tz=timezone.utc).isoformat(),
+                'window_end': datetime.fromtimestamp(ts_r[1], tz=timezone.utc).isoformat(),
+                'event_count': 1,
+                'detection_type': 'data_exfiltration',
+                'raw_logs': [],
+                'detection_confidence': 'Heuristic (PCAP)',
+                'metrics': {'total_bytes': total, 'total_mb': round(total / (1024*1024), 2)},
+            })
+
     return alerts
 
 
@@ -615,6 +768,10 @@ DETECTION_LABELS = {
     'dns_anomaly': 'DNS Anomaly (NXDOMAIN / SERVFAIL)',
     'http_error': 'HTTP Error (4xx/5xx Response)',
     'generic_error': 'Generic Error / Failure',
+    'port_scan': 'Port Scan (Multi-Port Probe)',
+    'distributed_ssh_attack': 'Distributed SSH Attack (Multi-Source)',
+    'data_exfiltration': 'Data Exfiltration (Large Outbound Volume)',
+    'privilege_escalation': 'Privilege Escalation (sudo/group change)',
 }
 
 
@@ -728,13 +885,19 @@ def enrich_ip(ip, alert_data, local_intel, cache):
                 entropy = metrics.get('avg_entropy', 0)
                 stddev = metrics.get('timing_stddev')
                 
-                # High volume + low diversity = Misconfigured App (False Positive)
-                if diversity < 5 and event_count > 50:
-                    return 'FALSE POSITIVE', 'Automated Triage (Misconfig)', {'reason': f'Low diversity ({diversity}) despite high volume'}
+                env_avg = alert_data.get('env_baseline', {}).get('dns_anomaly_avg_count', 10)
+                
+                # Ratio-based: if we have massive volume but very few unique domains, it's a misconfig
+                if diversity / max(1, event_count) < 0.05 and event_count > max(20, env_avg * 0.5):
+                    return 'FALSE POSITIVE', 'Automated Triage (Misconfig)', {
+                        'reason': f'Very low diversity ratio ({diversity}/{event_count}) implies application retry logic'
+                    }
 
                 # High entropy + high diversity = DGA (True Positive)
-                if entropy > 3.5 and diversity > 50:
-                    return 'TRUE POSITIVE', 'Automated Triage (DGA/Beacon)', {'reason': f'High entropy ({entropy}) and diversity ({diversity})'}
+                if entropy > 3.5 and diversity > max(20, event_count * 0.3):
+                    return 'TRUE POSITIVE', 'Automated Triage (DGA/Beacon)', {
+                        'reason': f'High entropy ({entropy}) and high diversity ratio ({diversity}/{event_count}) indicates DGA'
+                    }
                 
                 # Strict regularity = Slow Beacon (True Positive)
                 if stddev is not None and stddev < 2.0 and event_count >= 5:
@@ -743,16 +906,17 @@ def enrich_ip(ip, alert_data, local_intel, cache):
             elif alert_data.get('detection_type') == 'ssh_brute_force' and metrics:
                 username_diversity = metrics.get('username_diversity', 0)
                 stddev = metrics.get('timing_stddev')
+                
+                env_avg = alert_data.get('env_baseline', {}).get('ssh_brute_force_avg_count', 10)
 
-                # Many distinct usernames = credential spray/stuffing → lean TP
-                if username_diversity > 5 and event_count >= 10:
+                # Ratio-based: high ratio of unique usernames to attempts = credential spray
+                if username_diversity / max(1, event_count) > 0.4 and event_count >= 5:
                     return 'TRUE POSITIVE', 'Automated Triage (Credential Spray)', {
-                        'reason': f'{username_diversity} distinct usernames tried from one source — credential spray pattern'
+                        'reason': f'High username diversity ratio ({username_diversity}/{event_count}) — credential spray pattern'
                     }
 
                 # Low-variance timing across many attempts = scripted attack
-                # (e.g. slow_ssh_bruteforce.py with 30-60s jitter produces characteristic stddev)
-                if stddev is not None and stddev < 5.0 and event_count >= 15:
+                if stddev is not None and stddev < 5.0 and event_count > max(10, env_avg * 0.2):
                     return 'TRUE POSITIVE', 'Automated Triage (Scripted Attack)', {
                         'reason': f'Rigid timing cadence (stddev {stddev}s) across {event_count} attempts — scripted behavior'
                     }
@@ -763,17 +927,19 @@ def enrich_ip(ip, alert_data, local_intel, cache):
             elif alert_data.get('detection_type') == 'http_error' and metrics:
                 uri_diversity = metrics.get('uri_diversity', 0)
                 stddev = metrics.get('timing_stddev')
+                
+                env_avg = alert_data.get('env_baseline', {}).get('http_error_avg_count', 20)
 
-                # Many distinct URIs hit in burst = directory/path scanning → lean TP
-                if uri_diversity > 20 and event_count >= 30:
+                # Ratio-based: many unique URIs relative to errors = path scanning
+                if uri_diversity / max(1, event_count) > 0.3 and event_count >= 10:
                     return 'TRUE POSITIVE', 'Automated Triage (Path Scanning)', {
-                        'reason': f'{uri_diversity} distinct URIs probed — directory/path scanning pattern'
+                        'reason': f'High URI diversity ratio ({uri_diversity}/{event_count}) — directory/path scanning pattern'
                     }
 
-                # Same endpoint hit repeatedly with low diversity could be app retry logic
-                if uri_diversity < 3 and event_count > 50:
+                # Same endpoint hit repeatedly with low diversity = app retry logic
+                if uri_diversity / max(1, event_count) < 0.05 and event_count > max(30, env_avg * 0.5):
                     return 'FALSE POSITIVE', 'Automated Triage (App Retry)', {
-                        'reason': f'Low URI diversity ({uri_diversity}) despite {event_count} errors — likely application retry logic'
+                        'reason': f'Extremely low URI diversity ratio ({uri_diversity}/{event_count}) implies application retry logic'
                     }
 
             # Dynamic Host Profile Context
@@ -874,6 +1040,19 @@ def main():
         if not gt_records:
             log.info("Enriching %d IPs via Threat Intel...", len(alerts))
             import concurrent.futures
+            
+            # --- Dynamic Environmental Baselining ---
+            env_baseline = {}
+            if alerts:
+                for dtype in set(a.get('detection_type') for a in alerts):
+                    type_alerts = [a for a in alerts if a.get('detection_type') == dtype]
+                    if type_alerts:
+                        avg_count = sum(a.get('event_count', 0) for a in type_alerts) / len(type_alerts)
+                        env_baseline[f'{dtype}_avg_count'] = avg_count
+            
+            for a in alerts:
+                a['env_baseline'] = env_baseline
+            # ----------------------------------------
             
             def _enrich_worker(alert):
                 ip = alert['source_ip']

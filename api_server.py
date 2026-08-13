@@ -116,7 +116,7 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
       • HTTP responses    → status_code for 4xx/5xx detection
     """
     stats = {"tcp_connections": 0, "dns_events": 0, "http_events": 0,
-             "packets_read": 0, "errors": 0, "linktype": None}
+             "tcp_bytes_tracked": 0, "packets_read": 0, "errors": 0, "linktype": None}
 
     with open(pcap_path, 'rb') as f:
         pcap = _open_pcap(f)
@@ -177,6 +177,18 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                 rec["auth_success"] = False
                             out.write(json.dumps(rec) + '\n')
                             stats["tcp_connections"] += 1
+
+                        # Track TCP payload bytes for data exfil detection
+                        elif tcp.data and len(tcp.data) > 0:
+                            payload_len = len(tcp.data)
+                            # Only emit for non-trivial payloads (>100 bytes) to avoid flooding
+                            if payload_len > 100:
+                                out.write(json.dumps({
+                                    "ts": ts, "id.orig_h": src_ip, "id.resp_h": dst_ip,
+                                    "id.resp_p": tcp.dport, "proto": "tcp",
+                                    "pcap_event": "data", "payload_bytes": payload_len,
+                                }) + '\n')
+                                stats["tcp_bytes_tracked"] += payload_len
 
                         # HTTP response parsing (ports 80/8080/8000)
                         elif tcp.sport in (80, 8080, 8000) and tcp.data:
