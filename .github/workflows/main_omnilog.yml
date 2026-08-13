@@ -60,7 +60,9 @@ jobs:
         with:
           name: python-app
       
-      - name: Login to Azure
+      - name: Login to Azure (OIDC)
+        id: azure-login
+        continue-on-error: true
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_8CAEB07261DC4BD5AF444758CEAF154E }}
@@ -68,10 +70,17 @@ jobs:
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_578885EAA1D641A5BA214C297CCC6320 }}
 
       - name: 'Deploy to Azure Web App'
+        if: steps.azure-login.outcome == 'success'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
           app-name: 'omnilog'
           slot-name: 'Production'
-          
- 
+      
+      - name: 'Deploy to Azure Web App (publish profile fallback)'
+        if: steps.azure-login.outcome != 'success'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'omnilog'
+          slot-name: 'Production'
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_8CAEB07261DC4BD5AF444758CEAF154E }}
