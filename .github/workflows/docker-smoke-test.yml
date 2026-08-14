@@ -33,12 +33,12 @@ jobs:
       - name: Verify Backend (No Auth)
         run: |
           # Should return 200 OK since no API_KEY is set
-          curl -f -i http://localhost:5000/reports || exit 1
+          curl -f -i http://localhost:5000/reports || { echo "Failed NO AUTH backend check"; docker logs omnilog-api; exit 1; }
 
       - name: Verify Frontend
         run: |
           # Should serve HTML on port 5173
-          curl -f -i http://localhost:5173 || exit 1
+          curl -f -i http://localhost:5173 || { echo "Failed NO AUTH frontend check"; docker logs omnilog-dashboard; exit 1; }
 
       - name: Tear Down Containers
         run: docker compose down
@@ -62,6 +62,10 @@ jobs:
           echo "Received status code: $STATUS_CODE"
           if [ "$STATUS_CODE" -ne 401 ]; then
             echo "Auth enforcement failed. Expected 401, got $STATUS_CODE"
+            echo "--- BACKEND LOGS ---"
+            docker logs omnilog-api
+            echo "--- FRONTEND LOGS ---"
+            docker logs omnilog-dashboard
             exit 1
           fi
 

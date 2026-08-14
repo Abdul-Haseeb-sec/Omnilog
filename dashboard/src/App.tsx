@@ -271,11 +271,11 @@ function App() {
                 </div>
               </div>
 
-              {selectedAlert.intel_details && selectedAlert.intel_details["Executive Summary"] && (
+              {!!(selectedAlert.intel_details && selectedAlert.intel_details["Executive Summary"]) && (
                 <div className="detail-section">
                   <div className="detail-section-title">Executive Summary</div>
                   <p style={{ lineHeight: 1.5, color: '#e2e8f0', margin: '8px 0' }}>
-                    {selectedAlert.intel_details["Executive Summary"]}
+                    {String(selectedAlert.intel_details["Executive Summary"])}
                   </p>
                 </div>
               )}

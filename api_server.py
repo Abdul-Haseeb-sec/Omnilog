@@ -25,6 +25,7 @@ from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import dpkt
 import re
+import struct
 
 class FileLock:
     def __init__(self, path, timeout=10):
