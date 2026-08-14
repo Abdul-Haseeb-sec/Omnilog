@@ -392,7 +392,7 @@ function App() {
       {/* ── Header ───────────────────────────────────────────── */}
       <header className="header">
         <div>
-          <h1>Adversary Emulation Lab</h1>
+          <h1>OmniLog</h1>
           <p className="text-muted">OmniLog Detection Harness &amp; Telemetry Viewer</p>
         </div>
         <div className="flex-center gap-sm">

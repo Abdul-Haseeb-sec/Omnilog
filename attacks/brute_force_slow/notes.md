@@ -3,7 +3,7 @@
 ## What it does
 Standard brute force tools (like Hydra or Ncrack) blast a server with hundreds of authentication attempts per minute. Modern SOC rules often catch this easily using a tight time-window threshold (e.g., `count(failed_logins) > 5 in 1m`). 
 
-This script emulates an adversary trying to evade that rule by acting "low and slow". It uses Python's `paramiko` library to attempt one SSH login every 30 to 60 seconds (with randomized jitter). Because a new TCP connection is opened for each attempt, the source port rotates, making connection-oriented tracking and simple threshold alerts fail.
+This script performs an attack trying to evade that rule by acting "low and slow". It uses Python's `paramiko` library to attempt one SSH login every 30 to 60 seconds (with randomized jitter). Because a new TCP connection is opened for each attempt, the source port rotates, making connection-oriented tracking and simple threshold alerts fail.
 
 Crucially, it also writes its own ground-truth JSON log recording the exact UTC timestamp, target, and outcome of every attempt. This allows you to programmatically validate your detections against a source of absolute truth.
 

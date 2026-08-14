@@ -1,6 +1,6 @@
 # Lab Setup Instructions
 
-This directory contains the necessary configuration files and instructions to reproduce the Adversary Emulation Lab environment.
+This directory contains the necessary configuration files and instructions to reproduce the OmniLog Detection Lab environment.
 
 ## Infrastructure Requirements
 To accurately reproduce the attacks and detections, you will need an isolated virtualization environment (e.g., VMware Workstation, VirtualBox, or a dedicated VLAN). 
@@ -21,4 +21,4 @@ To accurately reproduce the attacks and detections, you will need an isolated vi
   * In `local.zeek`, add: `@load policy/tuning/json-logs.zeek`
 
 ## Reproducibility
-*Never run these emulation scripts against production infrastructure without explicit authorization.* All testing must be confined to this lab environment.
+*Never run these attack scripts against production infrastructure without explicit authorization.* All testing must be confined to this lab environment.

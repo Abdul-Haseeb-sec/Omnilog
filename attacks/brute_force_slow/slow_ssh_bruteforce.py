@@ -92,7 +92,7 @@ def slow_bruteforce(target, port, username, password_list, min_delay, max_delay,
         sys.exit(1)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Slow SSH Brute Force Emulator (Adversary Emulation)")
+    parser = argparse.ArgumentParser(description="Slow SSH Brute Force Script")
     parser.add_argument("-t", "--target", required=True, help="Target IP address")
     parser.add_argument("-p", "--port", type=int, default=22, help="Target SSH port")
     parser.add_argument("-u", "--username", required=True, help="Target username")

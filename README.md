@@ -1,6 +1,6 @@
-# Adversary Emulation & Detection Lab
+# OmniLog
 
-A detection engineering tool that implements a complete **attack → capture → detect → validate** loop. Upload raw logs or PCAP captures and get real threat intelligence enrichment — no simulations, no fake data.
+A detection engineering tool that implements a complete **attack → capture → detect → validate** loop. Upload raw logs or PCAP captures and get real threat intelligence enrichment — no mock events, no fake data.
 
 ## Architecture
 
@@ -115,7 +115,7 @@ Upload `.pcap`, `.pcapng`, or `.cap` files directly from Wireshark, tcpdump, or 
 │       ├── App.tsx            # Dashboard UI
 │       └── index.css          # Design system
 ├── attacks/
-│   └── brute_force_slow/      # SSH brute force emulator + notes
+│   └── brute_force_slow/      # SSH brute force script + notes
 ├── detections/
 │   └── brute_force.yml        # Sigma detection rules
 └── lab-setup/
