@@ -168,7 +168,7 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                     win_user = None
                     win_hostname = None
                     
-                    def check_payload_for_intel(payload):
+                    def check_payload_for_intel(payload, sport=None, dport=None):
                         nonlocal win_user, win_hostname
                         if not payload: return
                         # NTLMSSP Extraction
@@ -207,9 +207,71 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                             if m_sam: win_user = m_sam.group(1)
                         except Exception:
                             pass
+                            
+                        # Kerberos AS-REQ parsing (Port 88)
+                        if sport == 88 or dport == 88:
+                            try:
+                                def read_tlv(data, offset):
+                                    if offset >= len(data): return None, None, None, offset
+                                    tag = data[offset]
+                                    offset += 1
+                                    if offset >= len(data): return None, None, None, offset
+                                    length = data[offset]
+                                    offset += 1
+                                    if length & 0x80:
+                                        num_bytes = length & 0x7F
+                                        if offset + num_bytes > len(data): return None, None, None, offset
+                                        length = int.from_bytes(data[offset:offset+num_bytes], 'big')
+                                        offset += num_bytes
+                                    if offset + length > len(data): return None, None, None, offset
+                                    value = data[offset:offset+length]
+                                    return tag, length, value, offset + length
+
+                                k_payload = payload
+                                if len(k_payload) > 4 and k_payload[0] != 0x6a and k_payload[4] == 0x6a:
+                                    k_payload = k_payload[4:]
+                                if len(k_payload) >= 2 and k_payload[0] == 0x6a:
+                                    tag, length, value, _ = read_tlv(k_payload, 0)
+                                    if tag == 0x6a:
+                                        seq_tag, seq_len, seq_val, _ = read_tlv(value, 0)
+                                        if seq_tag == 0x30:
+                                            offset = 0
+                                            msg_type = None
+                                            req_body_val = None
+                                            while offset < len(seq_val):
+                                                t, l, v, offset = read_tlv(seq_val, offset)
+                                                if t == 0xA2:
+                                                    _, _, type_val, _ = read_tlv(v, 0)
+                                                    if type_val: msg_type = int.from_bytes(type_val, 'big')
+                                                elif t == 0xA4:
+                                                    req_body_val = v
+                                            if msg_type == 10 and req_body_val:
+                                                seq_tag, seq_len, body_seq, _ = read_tlv(req_body_val, 0)
+                                                if seq_tag == 0x30:
+                                                    cname_str = None
+                                                    offset = 0
+                                                    while offset < len(body_seq):
+                                                        t, l, v, offset = read_tlv(body_seq, offset)
+                                                        if t == 0xA1:
+                                                            seq_tag, _, princ_seq, _ = read_tlv(v, 0)
+                                                            if seq_tag == 0x30:
+                                                                p_off = 0
+                                                                while p_off < len(princ_seq):
+                                                                    pt, pl, pv, p_off = read_tlv(princ_seq, p_off)
+                                                                    if pt == 0xA1:
+                                                                        seq_tag2, _, name_seq, _ = read_tlv(pv, 0)
+                                                                        if seq_tag2 == 0x30:
+                                                                            str_t, _, str_v, _ = read_tlv(name_seq, 0)
+                                                                            if str_t == 0x1B:
+                                                                                cname_str = str_v.decode('utf-8', errors='ignore')
+                                                                        break
+                                                    if cname_str:
+                                                        win_user = cname_str
+                            except Exception:
+                                pass
 
                     if isinstance(ip_pkt.data, dpkt.tcp.TCP) or isinstance(ip_pkt.data, dpkt.udp.UDP):
-                        check_payload_for_intel(ip_pkt.data.data)
+                        check_payload_for_intel(ip_pkt.data.data, ip_pkt.data.sport, ip_pkt.data.dport)
 
                     if src_mac or win_user or win_hostname:
                         intel_rec = {

@@ -987,6 +987,17 @@ def enrich_ip(ip, alert_data, local_intel, cache):
     try:
         ip_obj = ipaddress.ip_address(ip)
         if ip_obj.is_private or ip_obj.is_loopback:
+            dc = alert_data.get('dynamic_context', {})
+            if dc.get('Malware'):
+                reason = f"{dc['Malware']} signature matched in payload"
+                if dc.get('Host Name'):
+                    reason += f" — host {dc['Host Name']}"
+                if dc.get('Windows User Account'):
+                    reason += f", user {dc['Windows User Account']}"
+                details = {'reason': reason}
+                details.update(base_details)
+                return 'TRUE POSITIVE', 'Confirmed Malware Signature', details
+
             # Automated classification based on advanced metrics
             metrics = alert_data.get('metrics')
             event_count = alert_data.get('event_count', 0)

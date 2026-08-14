@@ -123,17 +123,26 @@ function App() {
   const exportCSV = () => {
     if (!report) return
     const meta = `# Omnilog Export\n# Minimum Event Threshold: ${report.threshold}\n`
-    const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count\n'
-    const rows = report.alerts.map(a => [
-      a.source_ip,
-      a.classification,
-      a.classification_source || '',
-      a.detection_label || '',
-      a.detection_confidence || '',
-      a.window_start,
-      a.window_end,
-      String(a.event_count)
-    ].map(escapeCSVField).join(',')).join('\n')
+    const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count,Host Name,Windows User Account,Malware,C2 IP,C2 Port\n'
+    const rows = report.alerts.map(a => {
+      const idetails = a.intel_details || {}
+      const getField = (key: string) => String(idetails[key] || '')
+      return [
+        a.source_ip,
+        a.classification,
+        a.classification_source || '',
+        a.detection_label || '',
+        a.detection_confidence || '',
+        a.window_start,
+        a.window_end,
+        String(a.event_count),
+        getField('Host Name'),
+        getField('Windows User Account'),
+        getField('Malware'),
+        getField('C2 IP'),
+        getField('C2 Port')
+      ].map(escapeCSVField).join(',')
+    }).join('\n')
     const blob = new Blob([meta + h + rows], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
