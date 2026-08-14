@@ -147,6 +147,12 @@ This tool is designed for **localhost use only** by default.
 
 > **Sigma integration:** SSH brute-force is Sigma/YAML-rule-driven (`detections/brute_force.yml`). DNS anomaly and HTTP error detection use built-in heuristics (not yet YAML-configurable). Add new `.yml` rules to the `detections/` directory and they will be automatically picked up on the next analysis run.
 
+## Scope & Architectural Limitations
+
+- **Rate Limiting**: The upload rate limiter (10 per minute) is currently an in-memory counter. If running with `GUNICORN_WORKERS > 1`, this limit applies *per-worker*, meaning the actual throughput may be up to `10 * GUNICORN_WORKERS`.
+- **Malware Detections**: The malware beacon extraction logic currently supports exactly one format: STRRAT's pipe-delimited beacon string over TCP. Other malware families will not populate the `Malware` field even if their traffic is flagged by other anomalies.
+- **Windows Event Log Coverage**: The XML parser covers 6 specific Event IDs (4624/4625/4648/4672/4720/4732/4771) targeted for this lab's emulation scenarios, not full SIEM-grade coverage.
+
 ## License
 
 This project is for educational and research purposes.

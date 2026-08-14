@@ -1,5 +1,7 @@
 FROM python:3.11-slim
 
+RUN useradd -m -u 1000 user
+
 WORKDIR /app
 
 # Install dependencies first for better caching
@@ -12,8 +14,10 @@ COPY . .
 # Ensure run_prod.sh is executable
 RUN chmod +x run_prod.sh
 
-# Create persistent storage files/directories so Docker volume mapping doesn't create them as root directories
-RUN touch threat_intel.json && mkdir -p reports
+# Create persistent storage files/directories and set ownership
+RUN touch threat_intel.json && mkdir -p reports && chown -R user:user /app
+
+USER user
 
 EXPOSE 5000
 

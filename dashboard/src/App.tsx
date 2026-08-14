@@ -37,8 +37,11 @@ interface RunSummary {
 }
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000'
-const API_KEY = import.meta.env.VITE_API_KEY || ''
-const authHeaders: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {}
+
+const getAuthHeaders = (): Record<string, string> => {
+  const key = localStorage.getItem('OMNILOG_API_KEY')
+  return key ? { 'X-API-Key': key } : {}
+}
 
 
 function App() {
@@ -68,14 +71,14 @@ function App() {
 
   const loadIntel = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/threat_intel`, { headers: authHeaders })
+      const res = await fetch(`${API}/threat_intel`, { headers: getAuthHeaders() })
       if (res.ok) setIntelData(await res.json())
     } catch { /* backend offline */ }
   }, [])
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/reports`, { headers: authHeaders })
+      const res = await fetch(`${API}/reports`, { headers: getAuthHeaders() })
       if (res.ok) setRuns(await res.json())
     } catch { /* backend offline */ }
   }, [])
@@ -89,7 +92,7 @@ function App() {
     try {
       const res = await fetch(`${API}/upload`, { 
         method: 'POST', 
-        headers: authHeaders,
+        headers: getAuthHeaders(),
         body: fd 
       })
       if (!res.ok) {
@@ -108,12 +111,15 @@ function App() {
 
   const loadReport = async (id: string) => {
     try {
-      const res = await fetch(`${API}/reports/${id}`, { headers: authHeaders })
+      const res = await fetch(`${API}/reports/${id}`, { headers: getAuthHeaders() })
       if (res.ok) { setReport(await res.json()); setShowHistory(false) }
     } catch { alert('Failed to load report') }
   }
 
   const escapeCSVField = (value: string): string => {
+    if (/^[=+\-@\t\r]/.test(value)) {
+      value = "'" + value
+    }
     if (value.includes(',') || value.includes('"') || value.includes('\n')) {
       return '"' + value.replace(/"/g, '""') + '"'
     }
@@ -159,7 +165,7 @@ function App() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          ...authHeaders
+          ...getAuthHeaders()
         },
         body: JSON.stringify({ ip, classification }),
       })
@@ -178,7 +184,7 @@ function App() {
     try {
       const res = await fetch(`${API}/threat_intel/${ip}`, { 
         method: 'DELETE',
-        headers: authHeaders
+        headers: getAuthHeaders()
       })
       if (res.ok) { const next = { ...intelData }; delete next[ip]; setIntelData(next) }
     } catch { /* ignore */ }
@@ -417,6 +423,12 @@ function App() {
           </button>
           <button className="export-btn" onClick={exportCSV} disabled={!report}>
             <Download size={16} /> Export CSV
+          </button>
+          <button className="export-btn" onClick={() => {
+            const key = prompt('Enter API Key for backend authentication (stored locally):', localStorage.getItem('OMNILOG_API_KEY') || '')
+            if (key !== null) localStorage.setItem('OMNILOG_API_KEY', key)
+          }} title="Set API Key">
+            API Key
           </button>
         </div>
       </header>

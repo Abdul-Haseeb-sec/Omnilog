@@ -17,9 +17,10 @@ from api_server import app, INTEL_FILE, REPORTS_DIR
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """Create a test client with a temporary intel file."""
     app.config['TESTING'] = True
+    monkeypatch.setattr('api_server.API_KEY', None)
     with app.test_client() as client:
         yield client
 

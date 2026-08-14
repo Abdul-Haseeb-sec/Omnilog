@@ -18,12 +18,36 @@ import subprocess
 from collections import deque
 import time
 
+import hmac
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import dpkt
 import re
+
+class FileLock:
+    def __init__(self, path, timeout=10):
+        self.lock_path = path + '.lock'
+        self.timeout = timeout
+
+    def __enter__(self):
+        start = time.time()
+        while True:
+            try:
+                self.fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                return self
+            except FileExistsError:
+                if time.time() - start > self.timeout:
+                    raise TimeoutError(f"Could not acquire lock for {self.lock_path}")
+                time.sleep(0.05)
+                
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        os.close(self.fd)
+        try:
+            os.remove(self.lock_path)
+        except OSError:
+            pass
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 load_dotenv()
@@ -77,7 +101,7 @@ def require_api_key():
     
     if is_protected and API_KEY:
         provided_key = request.headers.get('X-API-Key')
-        if not provided_key or provided_key != API_KEY:
+        if not provided_key or not hmac.compare_digest(provided_key, API_KEY):
             return jsonify({'error': 'Unauthorized: Invalid or missing API key'}), 401
 
 
@@ -572,16 +596,17 @@ def mark_intel():
     if classification not in VALID_CLASSIFICATIONS:
         return jsonify({'error': f'Invalid classification. Must be one of: {", ".join(sorted(VALID_CLASSIFICATIONS))}'}), 400
 
-    intel_data = {}
-    if os.path.exists(INTEL_FILE):
-        try:
-            with open(INTEL_FILE, 'r', encoding='utf-8') as f:
-                intel_data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            log.warning("Corrupt threat_intel.json — starting fresh")
+    with FileLock(INTEL_FILE):
+        intel_data = {}
+        if os.path.exists(INTEL_FILE):
+            try:
+                with open(INTEL_FILE, 'r', encoding='utf-8') as f:
+                    intel_data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                log.warning("Corrupt threat_intel.json — starting fresh")
 
-    intel_data[ip] = {"classification": classification, "source": "Manual Tag"}
-    _atomic_write_json(INTEL_FILE, intel_data)
+        intel_data[ip] = {"classification": classification, "source": "Manual Tag"}
+        _atomic_write_json(INTEL_FILE, intel_data)
 
     log.info("Tagged %s → %s (manual)", ip, classification)
     return jsonify({'success': True, 'message': f'{ip} tagged as {classification}'})
@@ -607,17 +632,18 @@ def delete_threat_intel(ip_addr):
     except ValueError:
         return jsonify({'error': f'Invalid IP: {ip_addr}'}), 400
 
-    if not os.path.exists(INTEL_FILE):
-        return jsonify({'error': 'Not found'}), 404
+    with FileLock(INTEL_FILE):
+        if not os.path.exists(INTEL_FILE):
+            return jsonify({'error': 'Not found'}), 404
 
-    with open(INTEL_FILE, 'r', encoding='utf-8') as f:
-        intel_data = json.load(f)
+        with open(INTEL_FILE, 'r', encoding='utf-8') as f:
+            intel_data = json.load(f)
 
-    if ip_addr not in intel_data:
-        return jsonify({'error': 'IP not in database'}), 404
+        if ip_addr not in intel_data:
+            return jsonify({'error': 'IP not in database'}), 404
 
-    del intel_data[ip_addr]
-    _atomic_write_json(INTEL_FILE, intel_data)
+        del intel_data[ip_addr]
+        _atomic_write_json(INTEL_FILE, intel_data)
 
     log.info("Removed %s from threat intel", ip_addr)
     return jsonify({'success': True, 'message': f'{ip_addr} removed'})
