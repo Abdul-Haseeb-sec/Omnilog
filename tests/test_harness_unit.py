@@ -479,6 +479,26 @@ class TestEnrichIP:
         cls, src, _ = enrich_ip('10.0.0.5', alert, {}, {})
         assert cls == 'UNKNOWN'
 
+    def test_weak_heuristic_standalone_no_alert(self):
+        """A Weak Heuristic malware_beacon should not generate an alert independently."""
+        events = [
+            {'ts': '1000', 'id.orig_h': '10.0.0.5', 'id.resp_h': '8.8.8.8', 'id.resp_p': '80', 'pcap_event': 'malware_beacon', 'malware_name': 'GootLoader', 'malware_confidence': 'Weak Heuristic'},
+            {'ts': '1001', 'id.orig_h': '10.0.0.5', 'id.resp_h': '8.8.8.8', 'id.resp_p': '80', 'pcap_event': 'malware_beacon', 'malware_name': 'GootLoader', 'malware_confidence': 'Weak Heuristic'},
+        ]
+        # Should not alert because it doesn't trigger is_error = True
+        alerts = evaluate_rules(iter(events), threshold=1, window_hours=1)
+        assert len(alerts) == 0
+
+    def test_strong_heuristic_standalone_alert(self):
+        """A Signature Match or Heuristic Match malware_beacon SHOULD generate an alert independently."""
+        events = [
+            {'ts': '1000', 'id.orig_h': '10.0.0.5', 'id.resp_h': '8.8.8.8', 'id.resp_p': '80', 'pcap_event': 'malware_beacon', 'malware_name': 'STRRAT', 'malware_confidence': 'Signature Match'},
+        ]
+        alerts = evaluate_rules(iter(events), threshold=1, window_hours=1)
+        assert len(alerts) == 1
+        assert alerts[0]['detection_type'] == 'malware_beacon'
+
+
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

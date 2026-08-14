@@ -754,6 +754,10 @@ def evaluate_rules(records, threshold=None, window_hours=1):
                     is_error = True
                     detection_type = 'privilege_escalation'
 
+        if not is_error and record.get('pcap_event') == 'malware_beacon' and record.get('malware_confidence') != 'Weak Heuristic':
+            is_error = True
+            detection_type = 'malware_beacon'
+
         if not is_error:
             continue
 
@@ -1007,6 +1011,7 @@ DETECTION_LABELS = {
     'distributed_ssh_attack': 'Distributed SSH Attack (Multi-Source)',
     'data_exfiltration': 'Data Exfiltration (Large Outbound Volume)',
     'privilege_escalation': 'Privilege Escalation (sudo/group change)',
+    'malware_beacon': 'Confirmed Malware Signature',
 }
 
 
