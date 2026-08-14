@@ -39,7 +39,7 @@ interface RunSummary {
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 
 const getAuthHeaders = (): Record<string, string> => {
-  const key = localStorage.getItem('OMNILOG_API_KEY')
+  const key = localStorage.getItem('OMNILOG_API_KEY') || import.meta.env.VITE_API_KEY
   return key ? { 'X-API-Key': key } : {}
 }
 
