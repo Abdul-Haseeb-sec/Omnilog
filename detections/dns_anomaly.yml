@@ -1,0 +1,16 @@
+title: DNS Anomaly
+id: f42a1b9b-c2e7-4f67-8e1d-a3e9c7f5d6f1
+status: experimental
+description: Detects abnormal DNS queries such as NXDOMAIN or SERVFAIL which could indicate DGA or infrastructure misconfiguration.
+author: Detection Engineering Team
+date: 2026-08-14
+logsource:
+    product: zeek
+    service: dns
+detection:
+    selection:
+        rcode_name: 
+          - NXDOMAIN
+          - SERVFAIL
+    condition: selection
+level: medium

@@ -1,0 +1,14 @@
+title: Privilege Escalation
+id: 8d7f6e5a-b4c3-4d2e-1f0a-9e8d7c6b5a4f
+status: experimental
+description: Detects privilege escalation events (e.g. sudo).
+author: Detection Engineering Team
+date: 2026-08-14
+logsource:
+    product: linux
+    service: sudo
+detection:
+    selection:
+        event_type: privilege_escalation
+    condition: selection
+level: high

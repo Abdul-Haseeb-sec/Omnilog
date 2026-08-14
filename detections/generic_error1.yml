@@ -1,0 +1,13 @@
+title: Generic Error
+id: 12d3c4b5-a6e7-4f8d-9c1a-b2e3f4a5c6d7
+status: experimental
+description: Detects generic error fields in arbitrary Zeek logs.
+author: Detection Engineering Team
+date: 2026-08-14
+logsource:
+    product: zeek
+detection:
+    selection:
+        error|exists: true
+    condition: selection
+level: low

@@ -57,9 +57,39 @@ class DetectionRule:
 
     def match(self, record):
         for k, v in self.selection.items():
-            val = record.get(k)
+            field = k
+            modifier = None
+            if '|' in k:
+                field, modifier = k.split('|', 1)
+                
+            val = record.get(field)
+            
+            if modifier == 'exists':
+                exists = bool(val)
+                expected = True if str(v).lower() in ('true', 't', '1', 'yes') else False
+                if exists != expected: return False
+                continue
+                
             if val is None:
                 return False
+                
+            if modifier in ('gte', 'lte', 'gt', 'lt'):
+                try:
+                    num_val = float(val)
+                    num_v = float(v)
+                    if modifier == 'gte' and not (num_val >= num_v): return False
+                    if modifier == 'lte' and not (num_val <= num_v): return False
+                    if modifier == 'gt' and not (num_val > num_v): return False
+                    if modifier == 'lt' and not (num_val < num_v): return False
+                except (ValueError, TypeError):
+                    return False
+                continue
+                
+            if isinstance(v, list):
+                if str(val).lower() not in [str(x).lower() for x in v]:
+                    return False
+                continue
+
             if isinstance(v, bool):
                 val_lower = str(val).lower()
                 expected = 'true' if v else 'false'
@@ -619,26 +649,31 @@ def evaluate_rules(records, threshold=None, window_hours=1):
                 detection_type = rule.type_name
                 break
 
-        # Fallback to legacy hardcoded rules for DNS/HTTP
-        if not is_error:
-            if 'rcode_name' in record:
-                rcode = record['rcode_name']
-                if rcode in ('NXDOMAIN', 'SERVFAIL'):
-                    is_error = True
-                    detection_type = 'dns_anomaly'
-            elif 'status_code' in record:
-                try:
-                    if int(record['status_code']) >= 400:
+        # Fallback to legacy hardcoded rules ONLY as a last resort
+        if not LOADED_RULES:
+            if not getattr(evaluate_rules, "_warned_no_rules", False):
+                log.warning("No YAML rules loaded! Falling back to legacy hardcoded rules. Please ensure detections/ has valid .yml files.")
+                evaluate_rules._warned_no_rules = True
+                
+            if not is_error:
+                if 'rcode_name' in record:
+                    rcode = record['rcode_name']
+                    if rcode in ('NXDOMAIN', 'SERVFAIL'):
                         is_error = True
-                        detection_type = 'http_error'
-                except (ValueError, TypeError):
-                    pass
-            elif record.get('error') or record.get('failure'):
-                is_error = True
-                detection_type = 'generic_error'
-            elif record.get('event_type') == 'privilege_escalation':
-                is_error = True
-                detection_type = 'privilege_escalation'
+                        detection_type = 'dns_anomaly'
+                elif 'status_code' in record:
+                    try:
+                        if int(record['status_code']) >= 400:
+                            is_error = True
+                            detection_type = 'http_error'
+                    except (ValueError, TypeError):
+                        pass
+                elif record.get('error') or record.get('failure'):
+                    is_error = True
+                    detection_type = 'generic_error'
+                elif record.get('event_type') == 'privilege_escalation':
+                    is_error = True
+                    detection_type = 'privilege_escalation'
 
         if not is_error:
             continue
