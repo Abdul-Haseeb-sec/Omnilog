@@ -108,7 +108,7 @@ def require_api_key():
 # ── PCAP Linktype Constants ────────────────────────────────────────────────────
 DLT_EN10MB = 1         # Ethernet
 DLT_LINUX_SLL = 113    # Linux "cooked" capture (tcpdump -i any)
-DLT_RAW_VALUES = frozenset({12, 14, 101})  # Raw IP (varies by platform)
+DLT_RAW_VALUES = frozenset({12, 14, 101, 228, 229})  # Raw IP (varies by platform)
 
 
 def _atomic_write_json(path, data):
@@ -362,20 +362,39 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                 'STRRAT': lambda payload: _parse_pipe_beacon(payload),
                             }
                             
-                            MALWARE_SIGNATURES = {
-                                re.compile(rb'STRRAT'): 'STRRAT',
-                            }
                             malware_name = None
-                            for sig, name in MALWARE_SIGNATURES.items():
-                                if sig.search(tcp.data):
-                                    malware_name = name
+                            malware_confidence = None
+                            
+                            # Load dynamic signatures (only load once globally ideally, but doing it safely here)
+                            if not hasattr(check_payload_for_intel, 'malware_sigs'):
+                                check_payload_for_intel.malware_sigs = []
+                                sig_file = os.path.join(os.path.dirname(__file__), 'detections', 'malware_signatures.json')
+                                if os.path.exists(sig_file):
+                                    try:
+                                        with open(sig_file, 'r') as f:
+                                            sigs = json.load(f)
+                                            for sig in sigs:
+                                                check_payload_for_intel.malware_sigs.append({
+                                                    'family': sig['family'],
+                                                    'pattern': re.compile(sig['pattern'].encode('utf-8', errors='ignore')),
+                                                    'confidence': sig.get('confidence', 'Signature Match'),
+                                                    'parser': sig.get('parser')
+                                                })
+                                    except Exception as e:
+                                        log.error("Failed to load malware signatures: %s", e)
+
+                            for sig in check_payload_for_intel.malware_sigs:
+                                if sig['pattern'].search(tcp.data):
+                                    malware_name = sig['family']
+                                    malware_confidence = sig['confidence']
                                     break
                             
                             if malware_name:
                                 m_rec = {
                                     "ts": ts, "id.orig_h": src_ip, "id.resp_h": dst_ip,
                                     "id.resp_p": tcp.dport, "proto": "tcp",
-                                    "pcap_event": "malware_beacon", "malware_name": malware_name
+                                    "pcap_event": "malware_beacon", "malware_name": malware_name,
+                                    "malware_confidence": malware_confidence
                                 }
                                 if malware_name in BEACON_FIELD_PARSERS:
                                     extra = BEACON_FIELD_PARSERS[malware_name](tcp.data)

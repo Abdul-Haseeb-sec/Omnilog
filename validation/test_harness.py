@@ -321,9 +321,88 @@ def _parse_windows_xml(filepath, counts=None):
             if rec.get('id.orig_h'):
                 if counts is not None: counts[1] += 1
                 yield rec
+        # 4688 = Process Creation (execution/persistence)
+        elif eid == '4688':
+            rec['event_type'] = 'process_creation'
+            rec['process_name'] = fields.get('NewProcessName', '')
+            rec['command_line'] = fields.get('CommandLine', '')
+            rec['username'] = fields.get('SubjectUserName', '')
+            rec['id.orig_h'] = ip or rec['username'] or hostname
+            if rec['id.orig_h'] and rec['process_name']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4697 / 7045 = Service installed (persistence)
+        elif eid in ('4697', '7045'):
+            rec['event_type'] = 'service_installed'
+            rec['service_name'] = fields.get('ServiceName', '')
+            rec['service_path'] = fields.get('ServiceFileName', '')
+            rec['username'] = fields.get('SubjectUserName', '')
+            rec['id.orig_h'] = ip or rec['username'] or hostname
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4698 = Scheduled task created (persistence)
+        elif eid == '4698':
+            rec['event_type'] = 'scheduled_task_created'
+            rec['task_name'] = fields.get('TaskName', '')
+            rec['username'] = fields.get('SubjectUserName', '')
+            rec['id.orig_h'] = ip or rec['username'] or hostname
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4740 = Account lockout
+        elif eid == '4740':
+            rec['event_type'] = 'account_lockout'
+            rec['username'] = fields.get('TargetUserName', '')
+            rec['id.orig_h'] = ip or fields.get('SubjectUserName') or hostname
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4767 = Account unlocked
+        elif eid == '4767':
+            rec['event_type'] = 'account_unlocked'
+            rec['username'] = fields.get('TargetUserName', '')
+            rec['id.orig_h'] = ip or fields.get('SubjectUserName') or hostname
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4719 = Audit policy changed (defense evasion)
+        elif eid == '4719':
+            rec['event_type'] = 'audit_policy_changed'
+            rec['username'] = fields.get('SubjectUserName', '')
+            rec['id.orig_h'] = ip or rec['username'] or hostname
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 1102 = Security audit log cleared (defense evasion)
+        elif eid == '1102':
+            rec['event_type'] = 'audit_log_cleared'
+            rec['username'] = fields.get('SubjectUserName', '')
+            rec['id.orig_h'] = ip or rec['username'] or hostname
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 4104 = PowerShell Script Block Logging
+        elif eid == '4104':
+            rec['event_type'] = 'powershell_script_block'
+            rec['script_block'] = fields.get('ScriptBlockText', '')
+            rec['id.orig_h'] = ip or hostname
+            if rec['id.orig_h'] and rec['script_block']:
+                if counts is not None: counts[1] += 1
+                yield rec
+        # 5140 / 5145 = Network share access (lateral movement)
+        elif eid in ('5140', '5145'):
+            rec['event_type'] = 'network_share_access'
+            rec['share_name'] = fields.get('ShareName', '')
+            rec['target_name'] = fields.get('RelativeTargetName', '')
+            rec['username'] = fields.get('SubjectUserName', '')
+            rec['id.orig_h'] = ip or rec['username'] or hostname
+            if rec['id.orig_h']:
+                if counts is not None: counts[1] += 1
+                yield rec
 
     if counts is not None and counts[0] > 0:
-        log.info(f"Parsed XML: {counts[0]} events found, {counts[1]} matched known EventIDs [4624/4625/4648/4672/4720/4732/4771]")
+        log.info(f"Parsed XML: {counts[0]} events found, {counts[1]} matched known EventIDs")
 
 
 def _normalize_suricata(rec):

