@@ -526,7 +526,8 @@ def evaluate_rules(records, threshold=None, window_hours=1):
     
     # Trackers for thread intelligence enrichment
     ip_to_hostname_direct = collections.defaultdict(set)
-    ip_to_windows_user = collections.defaultdict(set)
+    ip_to_windows_user = collections.defaultdict(dict)
+    ip_to_machine_account = collections.defaultdict(dict)
     ip_to_full_name = collections.defaultdict(set)
     ip_to_username = collections.defaultdict(set)
     ip_to_malware = collections.defaultdict(set)
@@ -553,7 +554,10 @@ def evaluate_rules(records, threshold=None, window_hours=1):
                 ip_to_mac[ip] = mac
                 
             if ip:
-                if record.get('windows_user_account'): ip_to_windows_user[ip].add(str(record['windows_user_account']))
+                if record.get('windows_user_account'):
+                    val = str(record['windows_user_account'])
+                    if val.endswith('$'): ip_to_machine_account[ip][val.lower()] = val
+                    else: ip_to_windows_user[ip][val.lower()] = val
                 if record.get('full_user_name'): ip_to_full_name[ip].add(str(record['full_user_name']))
                 if record.get('username'): ip_to_username[ip].add(str(record['username']))
                 if record.get('hostname'): ip_to_hostname_direct[ip].add(str(record['hostname']))
@@ -592,7 +596,10 @@ def evaluate_rules(records, threshold=None, window_hours=1):
                         pass
 
             # Dynamically extract thread intel context from ALL records
-            if record.get('windows_user_account'): ip_to_windows_user[orig_h].add(str(record['windows_user_account']))
+            if record.get('windows_user_account'):
+                val = str(record['windows_user_account'])
+                if val.endswith('$'): ip_to_machine_account[orig_h][val.lower()] = val
+                else: ip_to_windows_user[orig_h][val.lower()] = val
             if record.get('full_user_name'): ip_to_full_name[orig_h].add(str(record['full_user_name']))
             if record.get('username'): ip_to_username[orig_h].add(str(record['username']))
             if record.get('hostname'): ip_to_hostname_direct[orig_h].add(str(record['hostname']))
@@ -733,8 +740,11 @@ def evaluate_rules(records, threshold=None, window_hours=1):
             if 'Host Name' not in alert['dynamic_context']:
                 alert['dynamic_context']['Host Name'] = ", ".join(h_names)
                 
-        if orig_h in ip_to_windows_user:
-            alert['dynamic_context']['Windows User Account'] = ", ".join(list(ip_to_windows_user[orig_h]))
+        if orig_h in ip_to_windows_user and ip_to_windows_user[orig_h]:
+            alert['dynamic_context']['Windows User Account'] = ", ".join(list(ip_to_windows_user[orig_h].values()))
+            
+        if orig_h in ip_to_machine_account and ip_to_machine_account[orig_h]:
+            alert['dynamic_context']['Machine Account'] = ", ".join(list(ip_to_machine_account[orig_h].values()))
             
         if orig_h in ip_to_full_name:
             alert['dynamic_context']['Full Name'] = ", ".join(list(ip_to_full_name[orig_h]))

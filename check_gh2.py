@@ -1,1 +1,0 @@
-﻿import urllib.request, json; data = json.loads(urllib.request.urlopen("https://api.github.com/repos/Abdul-Haseeb-sec/adversary-emulation-detection-lab/actions/runs").read()); run = data["workflow_runs"][0]; print("URL: " + run["html_url"]); print("Status: " + run["status"]); print("Conclusion: " + str(run["conclusion"]))

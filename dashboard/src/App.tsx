@@ -123,7 +123,7 @@ function App() {
   const exportCSV = () => {
     if (!report) return
     const meta = `# Omnilog Export\n# Minimum Event Threshold: ${report.threshold}\n`
-    const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count,Host Name,Windows User Account,Malware,C2 IP,C2 Port\n'
+    const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count,Host Name,Windows User Account,Machine Account,Malware,C2 IP,C2 Port\n'
     const rows = report.alerts.map(a => {
       const idetails = a.intel_details || {}
       const getField = (key: string) => String(idetails[key] || '')
@@ -138,6 +138,7 @@ function App() {
         String(a.event_count),
         getField('Host Name'),
         getField('Windows User Account'),
+        getField('Machine Account'),
         getField('Malware'),
         getField('C2 IP'),
         getField('C2 Port')

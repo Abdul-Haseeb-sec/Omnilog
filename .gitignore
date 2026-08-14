@@ -45,3 +45,9 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# Artifacts and Scratch Scripts
+*.zip
+deploy_temp/
+check_*.py
+test.txt
