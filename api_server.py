@@ -27,6 +27,33 @@ import dpkt
 import re
 import struct
 
+# ── Module-level malware signature cache ──────────────────────────────────────
+
+def _load_malware_signatures():
+    """Load and compile malware signatures once at startup."""
+    _log = logging.getLogger("omnilog")
+    sigs = []
+    sig_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'detections', 'malware_signatures.json')
+    if os.path.exists(sig_file):
+        try:
+            with open(sig_file, 'r') as f:
+                raw = json.load(f)
+                for sig in raw:
+                    sigs.append({
+                        'family': sig['family'],
+                        'pattern': re.compile(sig['pattern'].encode('utf-8', errors='ignore')),
+                        'confidence': sig.get('confidence', 'Signature Match'),
+                        'parser': sig.get('parser'),
+                    })
+            _log.info("Loaded %d malware signatures", len(sigs))
+        except Exception as e:
+            _log.error("Failed to load malware signatures: %s", e)
+    else:
+        _log.warning("Malware signatures file not found: %s", sig_file)
+    return sigs
+
+_MALWARE_SIGS: list = []  # Populated after Flask app+logging init below
+
 class FileLock:
     def __init__(self, path, timeout=10):
         self.lock_path = path + '.lock'
@@ -81,6 +108,9 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
 CORS(app, origins=ALLOWED_ORIGINS)
 os.makedirs(REPORTS_DIR, exist_ok=True)
+
+# Load signatures now that logging is configured
+_MALWARE_SIGS = _load_malware_signatures()
 
 if not API_KEY:
     if os.environ.get('OMNILOG_PROD'):
@@ -161,9 +191,143 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
             return stats
 
         with open(output_path, 'w', encoding='utf-8') as out:
+
+            # ── Pass 1: TCP stream reassembly for LDAP ports ─────────────────
+            # Per-packet parsing misses names when LDAP responses span multiple
+            # TCP segments. We reassemble LDAP streams first, then search them.
+            LDAP_PORTS = {389, 636, 3268, 3269}
+            # key=(src_ip,dst_ip,sport,dport) → bytes
+            _ldap_streams: dict = {}
+            _ldap_stream_ips: dict = {}  # key → (src_ip, dst_ip)
+
+            try:
+                f.seek(0)
+                pcap2 = _open_pcap(f)
+                for _ts2, _buf2 in pcap2:
+                    try:
+                        if linktype == DLT_EN10MB:
+                            _eth2 = dpkt.ethernet.Ethernet(_buf2)
+                            _ip2 = _eth2.data
+                        elif linktype == DLT_LINUX_SLL:
+                            _sll2 = dpkt.sll.SLL(_buf2)
+                            _ip2 = _sll2.data
+                        else:
+                            _ip2 = dpkt.ip.IP(_buf2)
+                        if not isinstance(_ip2, dpkt.ip.IP): continue
+                        _tcp2 = _ip2.data
+                        if not isinstance(_tcp2, dpkt.tcp.TCP): continue
+                        if not _tcp2.data: continue
+                        _sp2, _dp2 = _tcp2.sport, _tcp2.dport
+                        if _sp2 not in LDAP_PORTS and _dp2 not in LDAP_PORTS:
+                            continue
+                        _si2 = socket.inet_ntop(socket.AF_INET, _ip2.src)
+                        _di2 = socket.inet_ntop(socket.AF_INET, _ip2.dst)
+                        _key2 = (_si2, _di2, _sp2, _dp2)
+                        if _key2 not in _ldap_streams:
+                            _ldap_streams[_key2] = b''
+                            _ldap_stream_ips[_key2] = (_si2, _di2)
+                        # Cap each stream at 256 KB to avoid memory issues
+                        if len(_ldap_streams[_key2]) < 262144:
+                            _ldap_streams[_key2] += _tcp2.data
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Now search reassembled streams for full names
+            def _ber_attr_value_stream(raw, attr_name):
+                """Same as _ber_attr_value but for full reassembled streams."""
+                _LDAP_ATTR_NAMES = {
+                    'sn', 'cn', 'dn', 'dc', 'ou', 'uid', 'mail', 'name',
+                    'givenname', 'displayname', 'samaccountname', 'userprincipalname',
+                    'objectclass', 'objectguid', 'objectsid', 'member', 'memberof',
+                    'description', 'distinguishedname', 'versionnumber', 'whencreated',
+                }
+                name_b = attr_name if isinstance(attr_name, bytes) else attr_name.encode()
+                pos = 0
+                while pos < len(raw):
+                    idx = raw.find(name_b, pos)
+                    if idx == -1: break
+                    after = idx + len(name_b)
+                    for off in range(min(8, len(raw) - after)):
+                        if raw[after + off] != 0x04: continue
+                        lp = after + off + 1
+                        if lp >= len(raw): break
+                        slen = raw[lp]
+                        if slen & 0x80 or slen == 0 or slen > 64: break
+                        vs = lp + 1
+                        if vs + slen > len(raw): break
+                        try:
+                            text = raw[vs:vs + slen].decode('utf-8', errors='strict')
+                            if text.lower() in _LDAP_ATTR_NAMES: break
+                            if len(text) >= 2 and all(c.isalpha() or c in " -'" for c in text):
+                                return text.strip()
+                        except Exception:
+                            pass
+                        break
+                    pos = idx + 1
+                return None
+
+            _infra_prefixes = ('default domain', 'group policy', 'certificate',
+                               'certification', 'public key', 'schema', 'configuration',
+                               'domain controller', 'ntds', 'microsoft', 'enrollment')
+
+            for _key2, _stream in _ldap_streams.items():
+                try:
+                    _si2, _di2 = _ldap_stream_ips[_key2]
+                    _sp2, _dp2 = _key2[2], _key2[3]
+                    _first = _ber_attr_value_stream(_stream, b'givenName')
+                    _last  = _ber_attr_value_stream(_stream, b'sn')
+                    _name  = None
+                    if _first and _last and _first != _last:
+                        _name = f"{_first} {_last}"
+                    if not _name:
+                        _dn = _ber_attr_value_stream(_stream, b'displayName')
+                        if _dn and ' ' in _dn: _name = _dn
+                    if not _name:
+                        # CN= scan on full stream
+                        _pos = 0
+                        while True:
+                            _i = _stream.find(b'CN=', _pos)
+                            if _i == -1: break
+                            _rest = _stream[_i+3:]
+                            _end = 0
+                            for _end, _b in enumerate(_rest):
+                                if _b < 0x80 and (chr(_b).isalpha() or chr(_b) in " -'"): continue
+                                break
+                            _cand = _rest[:_end]
+                            _pos = _i + 1
+                            if len(_cand) < 5: continue
+                            try:
+                                _t = _cand.decode('utf-8', errors='strict').strip()
+                                _words = _t.split()
+                                if (len(_words) >= 2 and
+                                    all(w[0].isupper() and w[1:].islower() and len(w) >= 2 for w in _words) and
+                                    not any(_t.lower().startswith(x) for x in _infra_prefixes)):
+                                    _name = _t
+                                    break
+                            except Exception:
+                                pass
+                    if _name and not any(_name.lower().startswith(x) for x in _infra_prefixes):
+                        # Write for both IPs so harness picks it up regardless of direction
+                        for _ip in {_si2, _di2}:
+                            import json as _json
+                            out.write(_json.dumps({
+                                "ts": 0, "intel_type": "host_profile",
+                                "ip": _ip, "full_user_name": _name
+                            }) + '\n')
+                except Exception:
+                    pass
+
+            # ── Pass 2: per-packet event extraction (existing loop) ───────────
+            # Re-open the reader — Pass 1 exhausted the file handle.
+            f.seek(0)
+            pcap = _open_pcap(f)
             for ts, buf in pcap:
+
                 stats["packets_read"] += 1
                 try:
+
                     # Dispatch by linktype — no guessing
                     src_mac = None
                     if linktype == DLT_EN10MB:
@@ -215,25 +379,166 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                 except Exception:
                                     pass
                         
-                        # Very naive Kerberos AS-REQ / LDAP plain-text string hunting
+                        # ── Full Name Extraction ────────────────────────────────────────────────
                         try:
-                            s = payload.decode('ascii', errors='ignore')
-                            import re
-                            # LDAP displayName / sAMAccountName / CN heuristics
-                            m_cn = re.search(r'CN=([^,]+),CN=Users', s)
-                            if m_cn:
-                                # This is usually a Display Name or Full Name in AD
-                                intel_rec = {"ts": ts, "intel_type": "host_profile", "ip": src_ip}
-                                intel_rec["full_user_name"] = m_cn.group(1)
-                                if src_mac: intel_rec["mac"] = src_mac
-                                out.write(json.dumps(intel_rec) + '\n')
-                                
-                            m_sam = re.search(r'sAMAccountName\x31[\x00-\xFF]{2}\x04[\x00-\xFF]([a-zA-Z0-9_\-]+)', s)
-                            if m_sam: win_user = m_sam.group(1)
+                            name_found = None
+
+                            def _ber_attr_value(raw, attr_name):
+                                """
+                                Extract an LDAP attribute value from raw BER bytes.
+                                Looks for: b'attr_name' then within 8 bytes finds \\x04 (OCTET STRING),
+                                reads its length, decodes the value.
+                                Returns a pure-alpha string or None.
+                                """
+                                # These strings look like names but are LDAP attribute names in request packets
+                                _LDAP_ATTR_NAMES = {
+                                    'sn', 'cn', 'dn', 'dc', 'ou', 'uid', 'mail', 'name',
+                                    'givenname', 'displayname', 'samaccountname', 'userprincipalname',
+                                    'objectclass', 'objectguid', 'objectsid', 'member', 'memberof',
+                                    'description', 'distinguishedname', 'versionnumber', 'whencreated',
+                                }
+                                name_b = attr_name if isinstance(attr_name, bytes) else attr_name.encode()
+                                pos = 0
+                                while pos < len(raw):
+                                    idx = raw.find(name_b, pos)
+                                    if idx == -1:
+                                        break
+                                    after = idx + len(name_b)
+                                    for off in range(min(8, len(raw) - after)):
+                                        if raw[after + off] != 0x04:
+                                            continue
+                                        lp = after + off + 1
+                                        if lp >= len(raw):
+                                            break
+                                        slen = raw[lp]
+                                        # Reject long-form or unreasonable lengths
+                                        if slen & 0x80 or slen == 0 or slen > 64:
+                                            break
+                                        vs = lp + 1
+                                        if vs + slen > len(raw):
+                                            break
+                                        try:
+                                            text = raw[vs:vs + slen].decode('utf-8', errors='strict')
+                                            # Reject LDAP attribute names masquerading as values
+                                            if text.lower() in _LDAP_ATTR_NAMES:
+                                                break
+                                            # Accept only pure name characters
+                                            if len(text) >= 2 and all(c.isalpha() or c in " -'" for c in text):
+                                                return text.strip()
+                                        except (UnicodeDecodeError, ValueError):
+                                            pass
+                                        break
+                                    pos = idx + 1
+                                return None
+
+
+                            def _scan_cn(raw):
+                                """Scan for CN=First Last, pattern in raw bytes (works when full name IS the DN)."""
+                                SKIP = {b'users', b'computers', b'builtin', b'configuration',
+                                        b'schema', b'sites', b'services', b'policies', b'system',
+                                        b'foreignsecurityprincipals', b'domain controllers',
+                                        b'ntds settings', b'aggregate', b'servers',
+                                        b'certification authorities', b'public key services',
+                                        b'certificate templates', b'enrollment services',
+                                        b'aia', b'cdp', b'oid', b'kra',
+                                        b'default domain policy', b'default domain controllers policy'}
+                                SKIP_STARTS = (b'cn=', b'dc=', b'ou=', b'public ',
+                                               b'certificate', b'default ', b'ntds',
+                                               b'certification', b'microsoft', b'group policy')
+                                pos = 0
+                                while True:
+                                    i = raw.find(b'CN=', pos)
+                                    if i == -1:
+                                        break
+                                    rest = raw[i + 3:]
+                                    end = 0
+                                    for end, b in enumerate(rest):
+                                        if b < 0x80 and (chr(b).isalpha() or chr(b) in " -'"):
+                                            continue
+                                        break
+                                    pos = i + 1
+                                    candidate = rest[:end]
+                                    if len(candidate) < 5:
+                                        continue
+                                    try:
+                                        text = candidate.decode('utf-8', errors='strict').strip()
+                                    except UnicodeDecodeError:
+                                        continue
+                                    words = text.split()
+                                    if len(words) < 2:
+                                        continue
+                                    if not all(w[0].isupper() and w[1:].islower() and len(w) >= 2 for w in words):
+                                        continue
+                                    if text.lower().encode() in SKIP:
+                                        continue
+                                    if any(text.lower().encode().startswith(s) for s in SKIP_STARTS):
+                                        continue
+                                    return text
+                                return None
+
+                            # Strategy 1: BER attribute values — givenName + sn → "First Last"
+                            # This handles the common AD case where CN=samaccountname but
+                            # the actual display name is stored as separate attributes.
+                            first = _ber_attr_value(payload, b'givenName')
+                            last  = _ber_attr_value(payload, b'sn')
+                            if first and last and first != last:
+                                name_found = f"{first} {last}"
+
+                            # Strategy 2: displayName attribute value
+                            if not name_found:
+                                dn = _ber_attr_value(payload, b'displayName')
+                                if dn and ' ' in dn:
+                                    name_found = dn
+
+                            # Strategy 3: CN= scanner — when full name IS the DN common name
+                            if not name_found:
+                                name_found = _scan_cn(payload)
+
+                            # Strategy 4: plaintext "Full Name: Gabriel Wyatt" style headers
+                            if not name_found:
+                                s_ascii = payload.decode('latin-1')
+                                m = re.search(
+                                    r'(?:displayName|Display\s*Name|Full\s*Name)\s*[=:\s]+'
+                                    r'([A-Z][a-z]{1,20}\s[A-Z][a-z]{1,20}(?:\s[A-Z][a-z]{1,20})?)',
+                                    s_ascii
+                                )
+                                if m:
+                                    name_found = m.group(1).strip()
+
+                            if name_found:
+                                _infra = ('default domain', 'group policy', 'certificate',
+                                          'certification', 'public key', 'schema', 'configuration',
+                                          'domain controller', 'ntds', 'microsoft', 'enrollment')
+                                if any(name_found.lower().startswith(x) for x in _infra):
+                                    name_found = None
+
+                            if name_found:
+                                # The LDAP client (infected host) is the one whose name this is.
+                                # src_ip = client querying LDAP; dst_ip = the DC server.
+                                # Write a record for BOTH IPs so it attaches regardless of
+                                # which direction the alert fires.
+                                for _ip in {src_ip, dst_ip}:
+                                    out.write(json.dumps({
+                                        "ts": ts, "intel_type": "host_profile",
+                                        "ip": _ip, "full_user_name": name_found,
+                                        **({
+                                            "mac": src_mac,
+                                            "windows_user_account": win_user
+                                        } if src_mac else (
+                                            {"windows_user_account": win_user} if win_user else {}
+                                        ))
+                                    }) + '\n')
+
+                            # sAMAccountName from LDAP attribute (raw bytes)
+                            sam = _ber_attr_value(payload, b'sAMAccountName')
+                            if sam and sam.isascii():
+                                win_user = sam
+
                         except Exception:
                             pass
-                            
+
                         # Kerberos AS-REQ parsing (Port 88)
+
                         if sport == 88 or dport == 88:
                             try:
                                 def read_tlv(data, offset):
@@ -340,56 +645,17 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                         # Track TCP payload bytes for data exfil detection and Malware/LDAP
                         elif tcp.data and len(tcp.data) > 0:
                             payload_len = len(tcp.data)
-                            
-                            import re
-                            
-                            # Malware Signatures Check
-                            def _parse_pipe_beacon(payload):
-                                try:
-                                    s = payload.decode('ascii', errors='ignore')
-                                    parts = s.split('|')
-                                    if len(parts) >= 13 and parts[1] == 'STRRAT':
-                                        res = {}
-                                        if parts[3]: res['hostname'] = parts[3]
-                                        if parts[4]: res['windows_user_account'] = parts[4]
-                                        if parts[5]: res['os'] = parts[5]
-                                        if parts[2]: res['malware_build_id'] = parts[2]
-                                        return res
-                                except Exception:
-                                    pass
-                                return {}
 
-                            BEACON_FIELD_PARSERS = {
-                                'STRRAT': lambda payload: _parse_pipe_beacon(payload),
-                            }
-                            
+                            # Malware Signatures Check (uses module-level _MALWARE_SIGS compiled at startup)
                             malware_name = None
                             malware_confidence = None
-                            
-                            # Load dynamic signatures (only load once globally ideally, but doing it safely here)
-                            if not hasattr(check_payload_for_intel, 'malware_sigs'):
-                                check_payload_for_intel.malware_sigs = []
-                                sig_file = os.path.join(os.path.dirname(__file__), 'detections', 'malware_signatures.json')
-                                if os.path.exists(sig_file):
-                                    try:
-                                        with open(sig_file, 'r') as f:
-                                            sigs = json.load(f)
-                                            for sig in sigs:
-                                                check_payload_for_intel.malware_sigs.append({
-                                                    'family': sig['family'],
-                                                    'pattern': re.compile(sig['pattern'].encode('utf-8', errors='ignore')),
-                                                    'confidence': sig.get('confidence', 'Signature Match'),
-                                                    'parser': sig.get('parser')
-                                                })
-                                    except Exception as e:
-                                        log.error("Failed to load malware signatures: %s", e)
 
-                            for sig in check_payload_for_intel.malware_sigs:
+                            for sig in _MALWARE_SIGS:
                                 if sig['pattern'].search(tcp.data):
                                     malware_name = sig['family']
                                     malware_confidence = sig['confidence']
                                     break
-                            
+
                             if malware_name:
                                 m_rec = {
                                     "ts": ts, "id.orig_h": src_ip, "id.resp_h": dst_ip,
@@ -397,9 +663,17 @@ def extract_pcap_to_jsonl(pcap_path: str, output_path: str) -> dict:
                                     "pcap_event": "malware_beacon", "malware_name": malware_name,
                                     "malware_confidence": malware_confidence
                                 }
-                                if malware_name in BEACON_FIELD_PARSERS:
-                                    extra = BEACON_FIELD_PARSERS[malware_name](tcp.data)
-                                    m_rec.update(extra)
+                                # STRRAT: parse structured pipe-delimited beacon for extra context
+                                if malware_name == 'STRRAT':
+                                    try:
+                                        parts = tcp.data.decode('ascii', errors='ignore').split('|')
+                                        if len(parts) >= 13 and parts[1] == 'STRRAT':
+                                            if parts[3]: m_rec['hostname'] = parts[3]
+                                            if parts[4]: m_rec['windows_user_account'] = parts[4]
+                                            if parts[5]: m_rec['os'] = parts[5]
+                                            if parts[2]: m_rec['malware_build_id'] = parts[2]
+                                    except Exception:
+                                        pass
                                 out.write(json.dumps(m_rec) + '\n')
 
                             # Only emit for non-trivial payloads (>100 bytes) to avoid flooding

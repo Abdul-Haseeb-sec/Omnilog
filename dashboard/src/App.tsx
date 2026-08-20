@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { ShieldAlert, Activity, Upload, Download, FileJson, Globe, Beaker, Database, History, Trash2, Filter, X } from 'lucide-react'
+import { ShieldAlert, Activity, Upload, Download, FileJson, Globe, Beaker, Database, History, Trash2, Filter, X, Key, AlertCircle, CheckCircle } from 'lucide-react'
 import './index.css'
 
 interface Alert {
@@ -15,6 +15,7 @@ interface Alert {
   event_count: number
   raw_logs?: Record<string, unknown>[]
   intel_details?: Record<string, unknown>
+  dynamic_context?: Record<string, unknown>
 }
 
 interface Report {
@@ -54,7 +55,15 @@ function App() {
   const [showHistory, setShowHistory] = useState(false)
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [activeFilter, setActiveFilter] = useState<string | null>(null)
+  const [toast, setToast] = useState<{ message: string; type: 'error' | 'success' } | null>(null)
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false)
+  const [apiKeyInput, setApiKeyInput] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const showToast = (message: string, type: 'error' | 'success' = 'error') => {
+    setToast({ message, type })
+    setTimeout(() => setToast(null), 6000)
+  }
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>
@@ -97,13 +106,14 @@ function App() {
       })
       if (!res.ok) {
         const err = await res.json()
-        alert('Error: ' + err.error + (err.logs ? '\n\nLogs:\n' + err.logs : ''))
+        showToast('Analysis failed: ' + err.error + (err.logs ? ' (check console for logs)' : ''))
+        if (err.logs) console.error('Analysis logs:', err.logs)
         setLoading(false)
         return
       }
       setReport(await res.json())
     } catch {
-      alert('Cannot connect to backend. Ensure api_server.py is running on port 5000.')
+      showToast('Cannot connect to backend. Ensure api_server.py is running on port 5000.')
     }
     setLoading(false)
     if (fileInputRef.current) fileInputRef.current.value = ''
@@ -113,10 +123,13 @@ function App() {
     try {
       const res = await fetch(`${API}/reports/${id}`, { headers: getAuthHeaders() })
       if (res.ok) { setReport(await res.json()); setShowHistory(false) }
-    } catch { alert('Failed to load report') }
+      else showToast('Failed to load report: ' + res.status)
+    } catch { showToast('Network error loading report') }
   }
 
-  const escapeCSVField = (value: string): string => {
+  const escapeCSVField = (value: string | undefined | null): string => {
+    if (value === undefined || value === null) value = ''
+    value = String(value)
     if (/^[=+\-@\t\r]/.test(value)) {
       value = "'" + value
     }
@@ -126,13 +139,21 @@ function App() {
     return value
   }
 
+  /** Resolve a field from intel_details OR dynamic_context (backend stores enrichment in both). */
+  const getAlertField = (a: Alert, key: string): string => {
+    const fromIntel = a.intel_details?.[key]
+    if (fromIntel !== undefined && fromIntel !== null && String(fromIntel) !== '') return String(fromIntel)
+    const fromCtx = a.dynamic_context?.[key]
+    if (fromCtx !== undefined && fromCtx !== null && String(fromCtx) !== '') return String(fromCtx)
+    return ''
+  }
+
   const exportCSV = () => {
-    if (!report) return
-    const meta = `# Omnilog Export\n# Minimum Event Threshold: ${report.threshold}\n`
-    const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count,Host Name,Windows User Account,Machine Account,Malware,C2 IP,C2 Port\n'
+    if (!report || !report.alerts || report.alerts.length === 0) return
+    const NL = '\r\n'
+    const BOM = '\uFEFF'
+    const h = 'Source IP,Classification,Source,Detection Type,Evidence Type,Start Time,End Time,Event Count,Host Name,Windows User Account,Full Name,Malware,C2 IP,C2 Port' + NL
     const rows = report.alerts.map(a => {
-      const idetails = a.intel_details || {}
-      const getField = (key: string) => String(idetails[key] || '')
       return [
         a.source_ip,
         a.classification,
@@ -142,21 +163,23 @@ function App() {
         a.window_start,
         a.window_end,
         String(a.event_count),
-        getField('Host Name'),
-        getField('Windows User Account'),
-        getField('Machine Account'),
-        getField('Malware'),
-        getField('C2 IP'),
-        getField('C2 Port')
+        getAlertField(a, 'Host Name'),
+        getAlertField(a, 'Windows User Account'),
+        getAlertField(a, 'Full Name'),
+        getAlertField(a, 'Malware'),
+        getAlertField(a, 'C2 IP'),
+        getAlertField(a, 'C2 Port')
       ].map(escapeCSVField).join(',')
-    }).join('\n')
-    const blob = new Blob([meta + h + rows], { type: 'text/csv' })
+    }).join(NL)
+    const blob = new Blob([BOM + h + rows], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
     link.download = `omnilog_export_${Date.now()}.csv`
+    document.body.appendChild(link)
     link.click()
-    URL.revokeObjectURL(url)
+    document.body.removeChild(link)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
   const handleTag = async (ip: string, classification: string) => {
@@ -176,8 +199,9 @@ function App() {
         } : prev)
         if (selectedAlert?.source_ip === ip)
           setSelectedAlert(prev => prev ? { ...prev, classification, classification_source: 'Manual Tag' } : prev)
-      } else { alert('Failed: ' + res.status) }
-    } catch (err: unknown) { alert('Network error: ' + (err instanceof Error ? err.message : String(err))) }
+        showToast(`${ip} tagged as ${classification}`, 'success')
+      } else { showToast('Tag failed: ' + res.status) }
+    } catch (err: unknown) { showToast('Network error: ' + (err instanceof Error ? err.message : String(err))) }
   }
 
   const deleteIntel = async (ip: string) => {
@@ -222,6 +246,61 @@ function App() {
 
   return (
     <div className="dashboard-container">
+
+      {/* ── Toast Notifications ───────────────────────────────── */}
+      {toast && (
+        <div className={`toast toast-${toast.type}`}>
+          {toast.type === 'error' ? <AlertCircle size={16} /> : <CheckCircle size={16} />}
+          <span>{toast.message}</span>
+          <button className="toast-close" onClick={() => setToast(null)}><X size={14} /></button>
+        </div>
+      )}
+
+      {/* ── API Key Modal ─────────────────────────────────────── */}
+      {showApiKeyModal && (
+        <div className="modal-overlay" onClick={() => setShowApiKeyModal(false)}>
+          <div className="modal-box" style={{ maxWidth: 420 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Set API Key</h3>
+              <button className="modal-close-btn" onClick={() => setShowApiKeyModal(false)}>[ Close ]</button>
+            </div>
+            <div className="modal-body">
+              <p className="text-muted" style={{ marginBottom: '1rem', fontSize: '0.85rem' }}>
+                Enter your backend API key. It will be stored in your browser's localStorage and sent with every request.
+              </p>
+              <input
+                type="password"
+                className="api-key-input"
+                placeholder="Enter API key…"
+                value={apiKeyInput}
+                onChange={e => setApiKeyInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    localStorage.setItem('OMNILOG_API_KEY', apiKeyInput)
+                    setShowApiKeyModal(false)
+                    showToast('API key saved', 'success')
+                  }
+                }}
+                autoFocus
+              />
+              <div className="flex-center" style={{ gap: '0.5rem', marginTop: '1rem' }}>
+                <button className="tag-btn tag-btn-safe" onClick={() => {
+                  localStorage.setItem('OMNILOG_API_KEY', apiKeyInput)
+                  setShowApiKeyModal(false)
+                  showToast('API key saved', 'success')
+                }}>Save</button>
+                {localStorage.getItem('OMNILOG_API_KEY') && (
+                  <button className="tag-btn tag-btn-danger" onClick={() => {
+                    localStorage.removeItem('OMNILOG_API_KEY')
+                    setApiKeyInput('')
+                    showToast('API key cleared', 'success')
+                  }}>Clear</button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Alert Detail Modal ─────────────────────────────────── */}
       {selectedAlert && (
@@ -271,30 +350,32 @@ function App() {
                 </div>
               </div>
 
-              {!!(selectedAlert.intel_details && selectedAlert.intel_details["Executive Summary"]) && (
+              {!!(getAlertField(selectedAlert, 'Executive Summary')) && (
                 <div className="detail-section">
                   <div className="detail-section-title">Executive Summary</div>
                   <p style={{ lineHeight: 1.5, color: '#e2e8f0', margin: '8px 0' }}>
-                    {String(selectedAlert.intel_details["Executive Summary"])}
+                    {getAlertField(selectedAlert, 'Executive Summary')}
                   </p>
                 </div>
               )}
 
-              {selectedAlert.intel_details && Object.keys(selectedAlert.intel_details).filter(k => k !== 'Executive Summary').length > 0 && (
-                <div className="detail-section">
-                  <div className="detail-section-title">Threat Intelligence</div>
-                  <div className="detail-grid">
-                    {Object.entries(selectedAlert.intel_details)
-                      .filter(([k]) => k !== 'Executive Summary')
-                      .map(([k, v]) => (
-                      <div className="detail-item" key={k}>
-                        <span className="detail-label">{k.replace(/_/g, ' ')}</span>
-                        <span className="detail-value">{String(v)}</span>
-                      </div>
-                    ))}
+              {(() => {
+                const allDetails: Record<string, unknown> = { ...(selectedAlert.dynamic_context || {}), ...(selectedAlert.intel_details || {}) }
+                const entries = Object.entries(allDetails).filter(([k]) => k !== 'Executive Summary')
+                return entries.length > 0 ? (
+                  <div className="detail-section">
+                    <div className="detail-section-title">Threat Intelligence</div>
+                    <div className="detail-grid">
+                      {entries.map(([k, v]) => (
+                        <div className="detail-item" key={k}>
+                          <span className="detail-label">{k.replace(/_/g, ' ')}</span>
+                          <span className="detail-value">{String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                ) : null
+              })()}
 
               {selectedAlert.raw_logs && selectedAlert.raw_logs.length > 0 && (
                 <div className="detail-section">
@@ -425,10 +506,10 @@ function App() {
             <Download size={16} /> Export CSV
           </button>
           <button className="export-btn" onClick={() => {
-            const key = prompt('Enter API Key for backend authentication (stored locally):', localStorage.getItem('OMNILOG_API_KEY') || '')
-            if (key !== null) localStorage.setItem('OMNILOG_API_KEY', key)
+            setApiKeyInput(localStorage.getItem('OMNILOG_API_KEY') || '')
+            setShowApiKeyModal(true)
           }} title="Set API Key">
-            API Key
+            <Key size={16} /> API Key
           </button>
         </div>
       </header>

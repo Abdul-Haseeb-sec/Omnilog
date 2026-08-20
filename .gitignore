@@ -24,6 +24,12 @@ attacks/**/attack_ground_truth*.jsonl
 *.pcap
 *.gz
 
+# Debug artifacts (generated at runtime — never commit)
+debug.pcap
+
+# Build/deploy artifacts
+deploy.zip
+
 # Environment secrets
 .env
 *.env

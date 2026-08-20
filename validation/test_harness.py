@@ -893,9 +893,9 @@ def evaluate_rules(records, threshold=None, window_hours=1):
             hh_mm = "00:00"
 
         h_name = alert['dynamic_context'].get('Host Name', '')
-        uname = alert['dynamic_context'].get('Windows User Account', '')
+        uname = alert['dynamic_context'].get('Full Name', '')
         if not uname:
-            uname = alert['dynamic_context'].get('Full Name', '')
+            uname = alert['dynamic_context'].get('Windows User Account', '')
         malware = alert['dynamic_context'].get('Malware', '')
         c2_port = alert['dynamic_context'].get('C2 Port', '')
         c2_ip = alert['dynamic_context'].get('C2 IP', '')
@@ -1121,7 +1121,9 @@ def enrich_ip(ip, alert_data, local_intel, cache):
                 reason = f"{dc['Malware']} signature matched in payload"
                 if dc.get('Host Name'):
                     reason += f" — host {dc['Host Name']}"
-                if dc.get('Windows User Account'):
+                if dc.get('Full Name'):
+                    reason += f", user {dc['Full Name']}"
+                elif dc.get('Windows User Account'):
                     reason += f", user {dc['Windows User Account']}"
                 details = {'reason': reason}
                 details.update(base_details)
@@ -1140,19 +1142,21 @@ def enrich_ip(ip, alert_data, local_intel, cache):
                 
                 # Ratio-based: if we have massive volume but very few unique domains, it's a misconfig
                 if diversity / max(1, event_count) < 0.05 and event_count > max(20, env_avg * 0.5):
-                    return 'FALSE POSITIVE', 'Automated Triage (Misconfig)', {
-                        'reason': f'Very low diversity ratio ({diversity}/{event_count}) implies application retry logic'
-                    }
+                    d = {'reason': f'Very low diversity ratio ({diversity}/{event_count}) implies application retry logic'}
+                    d.update(base_details)
+                    return 'FALSE POSITIVE', 'Automated Triage (Misconfig)', d
 
                 # High entropy + high diversity = DGA (True Positive)
                 if entropy > 3.5 and diversity > max(20, event_count * 0.3):
-                    return 'TRUE POSITIVE', 'Automated Triage (DGA/Beacon)', {
-                        'reason': f'High entropy ({entropy}) and high diversity ratio ({diversity}/{event_count}) indicates DGA'
-                    }
+                    d = {'reason': f'High entropy ({entropy}) and high diversity ratio ({diversity}/{event_count}) indicates DGA'}
+                    d.update(base_details)
+                    return 'TRUE POSITIVE', 'Automated Triage (DGA/Beacon)', d
                 
                 # Strict regularity = Slow Beacon (True Positive)
                 if stddev is not None and stddev < 2.0 and event_count >= 5:
-                    return 'TRUE POSITIVE', 'Automated Triage (Rigid Timing)', {'reason': f'Rigid beaconing (stddev {stddev}s)'}
+                    d = {'reason': f'Rigid beaconing (stddev {stddev}s)'}
+                    d.update(base_details)
+                    return 'TRUE POSITIVE', 'Automated Triage (Rigid Timing)', d
 
             elif alert_data.get('detection_type') == 'ssh_brute_force' and metrics:
                 username_diversity = metrics.get('username_diversity', 0)
@@ -1162,15 +1166,15 @@ def enrich_ip(ip, alert_data, local_intel, cache):
 
                 # Ratio-based: high ratio of unique usernames to attempts = credential spray
                 if username_diversity / max(1, event_count) > 0.4 and event_count >= 5:
-                    return 'TRUE POSITIVE', 'Automated Triage (Credential Spray)', {
-                        'reason': f'High username diversity ratio ({username_diversity}/{event_count}) — credential spray pattern'
-                    }
+                    d = {'reason': f'High username diversity ratio ({username_diversity}/{event_count}) — credential spray pattern'}
+                    d.update(base_details)
+                    return 'TRUE POSITIVE', 'Automated Triage (Credential Spray)', d
 
                 # Low-variance timing across many attempts = scripted attack
                 if stddev is not None and stddev < 5.0 and event_count > max(10, env_avg * 0.2):
-                    return 'TRUE POSITIVE', 'Automated Triage (Scripted Attack)', {
-                        'reason': f'Rigid timing cadence (stddev {stddev}s) across {event_count} attempts — scripted behavior'
-                    }
+                    d = {'reason': f'Rigid timing cadence (stddev {stddev}s) across {event_count} attempts — scripted behavior'}
+                    d.update(base_details)
+                    return 'TRUE POSITIVE', 'Automated Triage (Scripted Attack)', d
 
                 # Single username retried many times could be a legit user with a stale password.
                 # Don't auto-FP — lockout scenarios are security-relevant. Leave as UNKNOWN.
@@ -1183,15 +1187,15 @@ def enrich_ip(ip, alert_data, local_intel, cache):
 
                 # Ratio-based: many unique URIs relative to errors = path scanning
                 if uri_diversity / max(1, event_count) > 0.3 and event_count >= 10:
-                    return 'TRUE POSITIVE', 'Automated Triage (Path Scanning)', {
-                        'reason': f'High URI diversity ratio ({uri_diversity}/{event_count}) — directory/path scanning pattern'
-                    }
+                    d = {'reason': f'High URI diversity ratio ({uri_diversity}/{event_count}) — directory/path scanning pattern'}
+                    d.update(base_details)
+                    return 'TRUE POSITIVE', 'Automated Triage (Path Scanning)', d
 
                 # Same endpoint hit repeatedly with low diversity = app retry logic
                 if uri_diversity / max(1, event_count) < 0.05 and event_count > max(30, env_avg * 0.5):
-                    return 'FALSE POSITIVE', 'Automated Triage (App Retry)', {
-                        'reason': f'Extremely low URI diversity ratio ({uri_diversity}/{event_count}) implies application retry logic'
-                    }
+                    d = {'reason': f'Extremely low URI diversity ratio ({uri_diversity}/{event_count}) implies application retry logic'}
+                    d.update(base_details)
+                    return 'FALSE POSITIVE', 'Automated Triage (App Retry)', d
 
             # Dynamic Host Profile Context
             lab_details = {'reason': 'Internal network, manual triage required'}
@@ -1327,7 +1331,7 @@ def main():
                 is_tp = ip_match and time_ok
                 alert['classification'] = 'TRUE POSITIVE' if is_tp else 'FALSE POSITIVE'
                 alert['classification_source'] = 'Ground Truth'
-                alert['intel_details'] = {}
+                alert['intel_details'] = alert.get('dynamic_context', {})
             else:
                 cls, source, details = intel_results[ip]
                 alert['classification'] = cls
