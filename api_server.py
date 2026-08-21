@@ -817,7 +817,8 @@ def upload_file():
 
         # ── Run the detection harness ──────────────────────────────────────
         log.info("Analyzing: %s (id=%s)", safe_name, request_id)
-        cmd = [sys.executable, 'validation/test_harness.py',
+        harness_path = os.path.join(SCRIPT_DIR, 'validation', 'test_harness.py')
+        cmd = [sys.executable, harness_path,
                '--zeek-log', process_path, '--output', report_file]
 
         if is_pcap:
