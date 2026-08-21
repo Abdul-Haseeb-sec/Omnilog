@@ -980,4 +980,4 @@ def get_report(report_id):
 
 if __name__ == '__main__':
     log.info("OmniLog API starting on port %d", API_PORT)
-    app.run(port=API_PORT, debug=False)
+    app.run(host='0.0.0.0', port=API_PORT, debug=False)
